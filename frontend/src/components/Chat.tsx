@@ -53,81 +53,106 @@ export default function Chat({
         scrollToBottom();
     }, [messages, partnerTyping]);
 
-    // WebSocket connection
+    // WebSocket connection with Auto-Reconnect
     useEffect(() => {
-        const ws = new WebSocket(`${getWsUrl()}/ws/${roomId}`);
-        wsRef.current = ws;
+        let ws: WebSocket | null = null;
+        let retryCount = 0;
+        let shouldReconnect = true;
+        let reconnectTimeout: NodeJS.Timeout;
 
-        ws.onopen = () => {
-            console.log("[Blind Connection] 🟢 WS Connected to room:", roomId);
-        };
+        const connect = () => {
+            console.log(`[Blind Connection] 🟡 Connecting to room: ${roomId} (Attempt ${retryCount + 1})`);
+            ws = new WebSocket(`${getWsUrl()}/ws/${roomId}`);
+            wsRef.current = ws;
 
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            console.log("[Blind Connection] 📨 WS Message:", data);
+            ws.onopen = () => {
+                console.log("[Blind Connection] 🟢 WS Connected");
+                retryCount = 0; // Reset retry count on success
+            };
 
-            switch (data.type) {
-                case "chat":
-                    setMessages((prev) => [
-                        ...prev,
-                        {
-                            id: Math.random().toString(36).substring(2, 15),
-                            sender: "partner",
-                            text: data.text,
-                            timestamp: Date.now(),
-                        },
-                    ]);
-                    setPartnerTyping(false);
-                    break;
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                console.log("[Blind Connection] 📨 WS Message:", data);
 
-                case "typing":
-                    setPartnerTyping(true);
-                    if (partnerTypingTimeoutRef.current)
-                        clearTimeout(partnerTypingTimeoutRef.current);
-                    partnerTypingTimeoutRef.current = setTimeout(
-                        () => setPartnerTyping(false),
-                        2000
-                    );
-                    break;
+                switch (data.type) {
+                    case "chat":
+                        setMessages((prev) => [
+                            ...prev,
+                            {
+                                id: Math.random().toString(36).substring(2, 15),
+                                sender: "partner",
+                                text: data.text,
+                                timestamp: Date.now(),
+                            },
+                        ]);
+                        setPartnerTyping(false);
+                        break;
 
-                case "reveal_request":
-                    if (revealState === "i_requested") {
+                    case "typing":
+                        setPartnerTyping(true);
+                        if (partnerTypingTimeoutRef.current)
+                            clearTimeout(partnerTypingTimeoutRef.current);
+                        partnerTypingTimeoutRef.current = setTimeout(
+                            () => setPartnerTyping(false),
+                            2000
+                        );
+                        break;
+
+                    case "reveal_request":
+                        if (revealState === "i_requested") {
+                            setRevealState("mutual");
+                        } else {
+                            setRevealState("partner_requested");
+                        }
+                        break;
+
+                    case "reveal_accept":
                         setRevealState("mutual");
+                        break;
+
+                    case "reveal_data":
+                        setPartnerRevealData(data.fields);
+                        break;
+
+                    case "partner_disconnected":
+                        console.log("[Blind Connection] ⚠️ Partner disconnected signal received");
+                        shouldReconnect = false; // Don't reconnect if partner actually left
+                        ws?.close();
+                        onDisconnected("partner_left");
+                        break;
+                }
+            };
+
+            ws.onclose = (event) => {
+                console.log(`[Blind Connection] 🔴 WS Closed: Code=${event.code}`);
+
+                if (shouldReconnect) {
+                    if (retryCount < 50) { // Infinite retries basically, for Vercel
+                        const timeout = Math.min(1000 * (retryCount + 1), 5000);
+                        console.log(`[Blind Connection] ⏳ Reconnecting in ${timeout}ms...`);
+                        reconnectTimeout = setTimeout(() => {
+                            retryCount++;
+                            connect();
+                        }, timeout);
                     } else {
-                        setRevealState("partner_requested");
+                        console.error("[Blind Connection] ❌ Max retry attempts reached");
+                        onDisconnected("error");
                     }
-                    break;
+                }
+            };
 
-                case "reveal_accept":
-                    setRevealState("mutual");
-                    break;
-
-                case "reveal_data":
-                    setPartnerRevealData(data.fields);
-                    break;
-
-                case "partner_disconnected":
-                    console.log("[Blind Connection] ⚠️ Partner disconnected signal received");
-                    onDisconnected("partner_left");
-                    break;
-            }
+            ws.onerror = (error) => {
+                console.error("[Blind Connection] ❌ WS Error:", error);
+                // Don't close here, wait for onclose
+            };
         };
 
-        ws.onclose = (event) => {
-            console.log(`[Blind Connection] 🔴 WS Closed: Code=${event.code}, Reason=${event.reason}`);
-            // If explicit close or error, could pass "error". For now default (null) is generic "lost connection".
-            // But if we already called onDisconnected("partner_left"), this might be redundant?
-            // The parent handles state change, so subsequent calls are ignored if component unmounts.
-            onDisconnected();
-        };
-
-        ws.onerror = (error) => {
-            console.error("[Blind Connection] ❌ WS Error:", error);
-            onDisconnected("error");
-        };
+        connect();
 
         return () => {
-            ws.close();
+            shouldReconnect = false;
+            clearTimeout(reconnectTimeout);
+            if (ws) ws.close();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [roomId]);
