@@ -50,6 +50,16 @@ export default function Chat({
         scrollToBottom();
     }, [messages, partnerTyping]);
 
+    // Warn on refresh/close
+    useEffect(() => {
+        const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+            e.preventDefault();
+            e.returnValue = "";
+        };
+        window.addEventListener("beforeunload", handleBeforeUnload);
+        return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+    }, []);
+
     // HTTP Polling Logic
     useEffect(() => {
         let active = true;

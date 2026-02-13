@@ -76,6 +76,16 @@ export default function WaitingRoom({
         };
     }, [interest, queueId, onMatched]);
 
+    // Warn on refresh/close
+    useEffect(() => {
+        const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+            e.preventDefault();
+            e.returnValue = "";
+        };
+        window.addEventListener("beforeunload", handleBeforeUnload);
+        return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+    }, []);
+
     const formatTime = (s: number) => {
         const m = Math.floor(s / 60);
         const sec = s % 60;
