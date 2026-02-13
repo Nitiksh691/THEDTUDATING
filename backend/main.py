@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import random
-import string
-import uuid
 import re
+import uuid
+import time
 from typing import Dict, List, Optional, Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from upstash_redis import Redis
 
 # ─── App ──────────────────────────────────────────────────────────────────────
 
@@ -29,9 +32,18 @@ def read_root():
     return {"message": "Blind Connection Backend is Running!", "docs": "/docs"}
 
 
-# ─── In-Memory State ─────────────────────────────────────────────────────────
+# ─── Redis & State ───────────────────────────────────────────────────────────
 
-# Common stop words to ignore when matching topics
+# Configuration
+# We check the Environment Variable first (Best Practice).
+# If not found, we use the hardcoded value (Zero-Config for you).
+UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL", "https://exact-tiger-55861.upstash.io")
+UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "Ado1AAIncDI4MTQ3ZDNmNWE2ODY0YjRjYjlmMzE1OGU2ZWZlNzI3MXAyNTU4NjE")
+
+# Initialize Upstash Redis (HTTP based, Vercel safe)
+redis = Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN)
+
+# Common stop words
 STOP_WORDS: Set[str] = {
     "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
     "of", "with", "by", "is", "it", "as", "be", "this", "that", "i",
@@ -45,61 +57,72 @@ def _codename() -> str:
     return f"Subject #{random.randint(100, 999)}"
 
 
-def _tokenize(text: str) -> Set[str]:
-    """Convert a topic string into a set of meaningful keywords."""
-    # Lowercase, remove special characters, split on whitespace
-    words = re.findall(r'[a-z0-9]+', text.lower())
-    # Remove stop words and very short words
-    return {w for w in words if w not in STOP_WORDS and len(w) > 1}
+# ─── Redis Helpers ───────────────────────────────────────────────────────────
 
+def add_to_queue(topic: str, user_data: dict):
+    # Store user data as JSON in a list
+    # Use lpush to add to wait list
+    redis.rpush(f"queue:{topic}", json.dumps(user_data))
 
-def _similarity(topic_a: str, topic_b: str) -> float:
-    """
-    Compute similarity between two topic strings.
-    Uses Jaccard similarity on keyword tokens.
-    Returns a float between 0.0 and 1.0.
-    """
-    tokens_a = _tokenize(topic_a)
-    tokens_b = _tokenize(topic_b)
+def find_match_in_queue(topic: str, my_gender: str, my_pref: str) -> Optional[dict]:
+    # Check length
+    key = f"queue:{topic}"
+    length = redis.llen(key)
+    if length == 0:
+        return None
+    
+    # Iterate (Upstash REST doesn't support complex Lua easily, so we mimic logic)
+    # We pop head. If match, return. If not, push back.
+    # Limit to checking 10 people to avoid slow requests
+    for _ in range(min(length, 10)):
+        data_str = redis.lpop(key)
+        if not data_str:
+            break
+            
+        partner = json.loads(data_str)
+        
+        # Check compatibility
+        partner_gender = partner["gender"]
+        partner_pref = partner["preference"]
 
-    if not tokens_a or not tokens_b:
-        # If either topic has no meaningful words, fallback to exact match
-        return 1.0 if topic_a.strip().lower() == topic_b.strip().lower() else 0.0
+        match_me = (partner_pref == "any") or (partner_pref == my_gender)
+        match_them = (my_pref == "any") or (my_pref == partner_gender)
 
-    intersection = tokens_a & tokens_b
-    union = tokens_a | tokens_b
+        if match_me and match_them:
+            return partner
+        else:
+            # Not a match, push back
+            redis.rpush(key, data_str)
+            
+    return None
 
-    if not union:
-        return 0.0
+def create_room(room_id: str, topic: str, user1: dict, user2: dict):
+    # Store room metadata
+    redis.set(f"room:{room_id}", json.dumps({
+        "topic": topic,
+        "users": [user1, user2],
+        "active": True
+    }))
+    # Set expire for safety (1 hour)
+    redis.expire(f"room:{room_id}", 3600)
 
-    return len(intersection) / len(union)
-
-
-# Minimum similarity score for a match (0.0 to 1.0)
-# 0.25 means at least ~25% keyword overlap
-MATCH_THRESHOLD = 0.25
-
-# Optimized queue: topic -> List[Request]
-waiting_queues: Dict[str, List[dict]] = {}
-
-# active_rooms[room_id] = { "topic": str, "users": { ws_id: WebSocket } }
-active_rooms: Dict[str, dict] = {}
-
-# Maps a room_id → { ws_id: codename }
-room_codenames: Dict[str, Dict[str, str]] = {}
+    # Notify users (Poller will check this)
+    # "match:{user_queue_id}" -> "room_id"
+    redis.setex(f"match:{user1['id']}", 300, room_id)
+    redis.setex(f"match:{user2['id']}", 300, room_id)
 
 
 # ─── REST Endpoints ──────────────────────────────────────────────────────────
 
 
 class MatchRequest(BaseModel):
-    interest: str  # Free-text topic
-    gender: str = "any"      # male, female, binary, any
-    preference: str = "any"  # male, female, binary, any
+    interest: str
+    gender: str = "any"
+    preference: str = "any"
 
 
 class MatchResponse(BaseModel):
-    status: str  # "matched" | "waiting"
+    status: str
     room_id: Optional[str] = None
     codename: Optional[str] = None
     partner_codename: Optional[str] = None
@@ -113,54 +136,23 @@ async def match(req: MatchRequest):
     if not raw_topic:
         return MatchResponse(status="error")
 
-    # Normalize topic for dictionary key (lowercase, simple spaces)
     topic = " ".join(raw_topic.lower().split())
-    
     gender = req.gender.lower()
     pref = req.preference.lower()
-
-    print(f"DEBUG: Match Req: '{topic}' ({gender} looking for {pref})")
-
-    # Ensure list exists
-    if topic not in waiting_queues:
-        waiting_queues[topic] = []
-
-    # Search for a partner in this specific topic queue (O(N) of waiters in this topic)
-    queue = waiting_queues[topic]
-    match_idx = -1
-
-    for i, entry in enumerate(queue):
-        # Check compatibility
-        # 1. My gender matches their preference? (or they don't care)
-        # 2. Their gender matches my preference? (or I don't care)
-        
-        partner_gender = entry["gender"]
-        partner_pref = entry["preference"]
-
-        match_me = (partner_pref == "any") or (partner_pref == gender)
-        match_them = (pref == "any") or (pref == partner_gender)
-
-        if match_me and match_them:
-            match_idx = i
-            break
     
-    if match_idx >= 0:
+    my_id = str(uuid.uuid4())
+    my_codename = _codename()
+
+    # Try to find match
+    partner = find_match_in_queue(topic, gender, pref)
+    
+    if partner:
         # Match found!
-        partner = queue.pop(match_idx)
-        # Cleanup empty topic key
-        if not queue:
-            del waiting_queues[topic]
-
         room_id = str(uuid.uuid4())
-        my_codename = _codename()
-
-        print(f"DEBUG: MATCH FOUND! Room: {room_id}")
         
-        active_rooms[room_id] = {"topic": topic, "users": {}}
-        room_codenames[room_id] = {
-            partner["id"]: partner["codename"],
-            "pending": my_codename,
-        }
+        create_room(room_id, topic, 
+                   {"id": my_id, "codename": my_codename}, 
+                   partner)
 
         return MatchResponse(
             status="matched",
@@ -170,20 +162,14 @@ async def match(req: MatchRequest):
             matched_topic=topic,
         )
     else:
-        # No match, join queue
-        my_id = str(uuid.uuid4())
-        my_codename = _codename()
-        
-        entry = {
+        # No match, list myself
+        add_to_queue(topic, {
             "id": my_id,
             "codename": my_codename,
-            "topic": topic,
             "gender": gender,
-            "preference": pref
-        }
-        waiting_queues[topic].append(entry)
-        
-        print(f"DEBUG: Added to queue '{topic}'. Size: {len(waiting_queues[topic])}")
+            "preference": pref,
+            "topic": topic
+        })
         
         return MatchResponse(
             status="waiting",
@@ -198,7 +184,7 @@ class CheckMatchRequest(BaseModel):
 
 
 class CheckMatchResponse(BaseModel):
-    status: str  # "waiting" | "matched" | "expired"
+    status: str
     room_id: Optional[str] = None
     codename: Optional[str] = None
     partner_codename: Optional[str] = None
@@ -206,120 +192,154 @@ class CheckMatchResponse(BaseModel):
 
 @app.post("/check-match", response_model=CheckMatchResponse)
 async def check_match(req: CheckMatchRequest):
-    """
-    Called by a waiting user to see if they have been matched yet.
-    """
-    # Optimized check: We don't know the topic easily here unless passed, 
-    # but we can scan values (O(T*N) where T is topics). 
-    # Since we need to know if they are still *in* value lists.
+    # Check if I have been matched
+    room_id = redis.get(f"match:{req.queue_id}")
     
-    # Ideally frontend sends topic so we can look up O(1).
-    # But for now, iterate values. High traffic optimization: User should send topic in CheckMatchRequest.
-    # The request ALREADY has `interest`. Use it!
-    
-    topic = " ".join(req.interest.strip().lower().split())
-    
-    # scan specific queue
-    if topic in waiting_queues:
-        for entry in waiting_queues[topic]:
-            if entry["id"] == req.queue_id:
-                 return CheckMatchResponse(status="waiting")
-    
-    # If not in that queue, maybe moved to room?
-    for room_id, codenames in room_codenames.items():
-        if req.queue_id in codenames:
-            my_codename = codenames[req.queue_id]
-            partner_codename = None
-            for uid, cn in codenames.items():
-                if uid != req.queue_id and uid != "pending":
-                    partner_codename = cn
-                elif uid == "pending":
-                    partner_codename = cn
+    if room_id:
+        room_data_str = redis.get(f"room:{room_id}")
+        if not room_data_str:
+             return CheckMatchResponse(status="expired")
+        
+        room_data = json.loads(room_data_str)
+        users = room_data["users"]
+        
+        # Identify me vs partner
+        if users[0]["id"] == req.queue_id:
+            my_user = users[0]
+            partner_user = users[1]
+        else:
+            my_user = users[1]
+            partner_user = users[0]
 
-            return CheckMatchResponse(
-                status="matched",
-                room_id=room_id,
-                codename=my_codename,
-                partner_codename=partner_codename,
-            )
-
-    return CheckMatchResponse(status="expired")
+        return CheckMatchResponse(
+            status="matched",
+            room_id=room_id,
+            codename=my_user["codename"],
+            partner_codename=partner_user["codename"],
+        )
+    
+    return CheckMatchResponse(status="waiting")
 
 
 @app.get("/queue-stats")
 async def queue_stats():
-    # Count waiting users
-    waiting_count = sum(len(q) for q in waiting_queues.values())
-
-    # Count active users in chat
-    chat_users_count = sum(len(room["users"]) for room in active_rooms.values())
-
-    # Aggregate topics
+    # Helper to get keys with pattern (expensive but ok for mvp)
+    # Upstash REST: 'keys' command
+    keys = redis.keys("queue:*")
+    waiting_count = 0
     top_topics = []
-    for topic, queue in waiting_queues.items():
-        if queue:
-            top_topics.append({"topic": topic.title(), "count": len(queue)})
     
-    # Sort
+    for k in keys:
+        length = redis.llen(k)
+        waiting_count += length
+        topic_name = k.replace("queue:", "").title()
+        if length > 0:
+            top_topics.append({"topic": topic_name, "count": length})
+            
     top_topics.sort(key=lambda x: x["count"], reverse=True)
-
+    
+    room_keys = redis.keys("room:*")
+    active_rooms = len(room_keys)
+    
     return {
-        "total_online": waiting_count + chat_users_count,
+        "total_online": waiting_count + (active_rooms * 2),
         "waiting_count": waiting_count,
-        "active_chat_users": chat_users_count,
+        "active_chat_users": active_rooms * 2,
         "top_topics": top_topics[:10]
     }
 
 
-# ─── WebSocket Chat Relay ─────────────────────────────────────────────────────
-
+# ─── WebSocket Chat with "Mailbox" ──────────────────────────────────────────
 
 @app.websocket("/ws/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: str):
     await websocket.accept()
-
+    
+    # 1. Identify User
+    # We assign a temp WebSocket ID
     ws_id = str(uuid.uuid4())
-    print(f"DEBUG: WS Connect {ws_id} → Room {room_id}")
+    
+    # 2. Add to room "participants" set for cleanup
+    # We use a set: `room:{id}:p`
+    redis.sadd(f"room:{room_id}:p", ws_id)
+    redis.expire(f"room:{room_id}:p", 3600)
+    
+    # Mailbox Keys
+    # We broadcast to ALL other participants in the room
+    # For a 2-person chat, it's just "the other person"
+    # But since we don't know the other person's WS_ID easily without tracking,
+    # we will use a global room list or just shared polling.
+    
+    # Better approach for Vercel:
+    # Use a shared list `room:{id}:messages`. 
+    # Clients track "last_read_index".
+    # BUT `ws` protocol doesn't support "ack" easily in this loop without custom protocol.
+    
+    # Alternative:
+    # Use `pubsub` equivalent via list.
+    # We maintain 2 lists: `mailbox:{room_id}:1` and `mailbox:{room_id}:2`? No too complex.
+    
+    # SHARED LIST approach:
+    # All messages go to `room:{id}:msgs`.
+    # Each consumer reads everything and filters out their own?
+    # Or just `lpop`? No, `lpop` deletes it for the other.
+    
+    # Let's use the explicit "Participant List" approach.
+    # 1. Get all participants: `smembers room:{room_id}:p`
+    # 2. Deliver to `mailbox:{ws_id}`
+    
+    active = True
+    
+    async def poller():
+        """Polls my specific mailbox"""
+        nonlocal active
+        while active:
+            # Check my mailbox
+            # lpop returns None if empty
+            try:
+                msg_str = redis.lpop(f"mailbox:{ws_id}")
+                if msg_str:
+                    await websocket.send_text(msg_str)
+                else:
+                    await asyncio.sleep(0.1) # polling delay
+            except Exception:
+                break
 
-    if room_id not in active_rooms:
-        active_rooms[room_id] = {"users": {}}
-    if room_id not in room_codenames:
-        room_codenames[room_id] = {}
-
-    room = active_rooms[room_id]
-    room["users"][ws_id] = websocket
-    print(f"DEBUG: Room {room_id} has {len(room['users'])} users: {list(room['users'].keys())}")
+    poll_task = asyncio.create_task(poller())
 
     try:
         while True:
-            data = await websocket.receive_json()
-            # Relay to partner(s) — never store
-            print(f"DEBUG: WS Recv from {ws_id}: {str(data)[:50]}...")
-            for uid, ws in room["users"].items():
-                if uid != ws_id:
-                    try:
-                        await ws.send_json(data)
-                        print(f"DEBUG:   → Relayed to {uid}")
-                    except Exception as e:
-                        print(f"DEBUG:   FAILED RELAY to {uid}: {e}")
-                        pass
+            data = await websocket.receive_text()
+            # Broadcast to others
+            participants = redis.smembers(f"room:{room_id}:p")
+            
+            for pid in participants:
+                if pid != ws_id:
+                    # Push to their mailbox
+                    redis.rpush(f"mailbox:{pid}", data)
+                    # Set expire on mailbox so it cleans up if they disconnect unexpectedly
+                    redis.expire(f"mailbox:{pid}", 300)
+
     except WebSocketDisconnect:
-        print(f"DEBUG: WS Disconnect {ws_id} from Room {room_id}")
-        # Clean up
-        room["users"].pop(ws_id, None)
-        # Notify remaining users
-        for uid, ws in list(room["users"].items()):
-            try:
-                await ws.send_json({"type": "partner_disconnected"})
-            except Exception:
-                pass
-        # If room is empty, delete it
-        if not room["users"]:
-            active_rooms.pop(room_id, None)
-            room_codenames.pop(room_id, None)
-    except Exception as e:
-        print(f"DEBUG: WS Error {ws_id}: {e}")
-        room["users"].pop(ws_id, None)
-        if not room["users"]:
-            active_rooms.pop(room_id, None)
-            room_codenames.pop(room_id, None)
+        active = False
+        # Remove myself
+        redis.srem(f"room:{room_id}:p", ws_id)
+        # Notify others
+        participants = redis.smembers(f"room:{room_id}:p")
+        disconnect_msg = json.dumps({"type": "partner_disconnected"})
+        for pid in participants:
+            if pid != ws_id:
+                redis.rpush(f"mailbox:{pid}", disconnect_msg)
+        
+        # Cleanup my mailbox
+        redis.delete(f"mailbox:{ws_id}")
+        
+        # If room empty, delete room metadata (save memory!)
+        if redis.scard(f"room:{room_id}:p") == 0:
+            redis.delete(f"room:{room_id}")
+            redis.delete(f"room:{room_id}:p")
+            # Also clean queues if any left
+            
+    finally:
+        active = False
+        poll_task.cancel()
