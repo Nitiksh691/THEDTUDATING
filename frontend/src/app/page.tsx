@@ -8,9 +8,9 @@ import Disconnected from "@/components/Disconnected";
 
 const getApiUrl = () => {
   if (typeof window !== "undefined") {
-    return process.env.NEXT_PUBLIC_API_URL || `http://${window.location.hostname}:8000`;
+    return process.env.NEXT_PUBLIC_API_URL || "https://thedtudating-xqwf.vercel.app";
   }
-  return "http://localhost:8000";
+  return "https://thedtudating-xqwf.vercel.app";
 };
 
 const SUGGESTIONS = [
@@ -255,8 +255,8 @@ export default function Home() {
                           key={g}
                           onClick={() => setMyGender(g.toLowerCase())}
                           className={`flex-1 py-2 text-xs font-bold rounded-md transition-all ${myGender === g.toLowerCase()
-                              ? "bg-white/20 text-white shadow-sm"
-                              : "text-white/40 hover:text-white/70"
+                            ? "bg-white/20 text-white shadow-sm"
+                            : "text-white/40 hover:text-white/70"
                             }`}
                         >
                           {g}
@@ -272,8 +272,8 @@ export default function Home() {
                           key={g}
                           onClick={() => setPreference(g.toLowerCase())}
                           className={`flex-1 py-2 text-xs font-bold rounded-md transition-all ${preference === g.toLowerCase()
-                              ? "bg-white/20 text-white shadow-sm"
-                              : "text-white/40 hover:text-white/70"
+                            ? "bg-white/20 text-white shadow-sm"
+                            : "text-white/40 hover:text-white/70"
                             }`}
                         >
                           {g}

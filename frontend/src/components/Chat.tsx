@@ -6,10 +6,9 @@ import RevealCard from "./RevealCard";
 
 const getWsUrl = () => {
     if (typeof window !== "undefined") {
-        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        return process.env.NEXT_PUBLIC_WS_URL || `${protocol}//${window.location.hostname}:8000`;
+        return process.env.NEXT_PUBLIC_WS_URL || "wss://thedtudating-xqwf.vercel.app";
     }
-    return "ws://localhost:8000";
+    return "wss://thedtudating-xqwf.vercel.app";
 };
 
 interface ChatProps {
