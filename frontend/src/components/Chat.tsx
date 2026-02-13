@@ -28,6 +28,7 @@ export default function Chat({
     partnerCodename,
     onDisconnected,
 }: ChatProps) {
+    const [userId] = useState(() => Math.random().toString(36).substring(2));
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState("");
     const [partnerTyping, setPartnerTyping] = useState(false);
@@ -36,7 +37,6 @@ export default function Chat({
     >("idle");
     const [partnerRevealData, setPartnerRevealData] = useState<Record<string, string> | null>(null);
 
-    const wsRef = useRef<WebSocket | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const partnerTypingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -50,119 +50,86 @@ export default function Chat({
         scrollToBottom();
     }, [messages, partnerTyping]);
 
-    // WebSocket connection with Auto-Reconnect
+    // HTTP Polling Logic
     useEffect(() => {
-        let ws: WebSocket | null = null;
-        let retryCount = 0;
-        let shouldReconnect = true;
-        let reconnectTimeout: NodeJS.Timeout;
+        let active = true;
+        const pollInterval = setInterval(async () => {
+            if (!active) return;
+            try {
+                const res = await fetch(`${getWsUrl().replace("wss:", "https:")}/chat/poll`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ room_id: roomId, user_id: userId }),
+                });
 
-        const connect = () => {
-            console.log(`[Blind Connection] 🟡 Connecting to room: ${roomId} (Attempt ${retryCount + 1})`);
-            ws = new WebSocket(`${getWsUrl()}/ws/${roomId}`);
-            wsRef.current = ws;
+                if (!res.ok) return;
 
-            ws.onopen = () => {
-                console.log("[Blind Connection] 🟢 WS Connected");
-                retryCount = 0; // Reset retry count on success
-            };
+                const data = await res.json();
+                const newMessages = data.messages || [];
 
-            ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                console.log("[Blind Connection] 📨 WS Message:", data);
-
-                switch (data.type) {
-                    case "chat":
-                        setMessages((prev) => [
-                            ...prev,
-                            {
-                                id: Math.random().toString(36).substring(2, 15),
-                                sender: "partner",
-                                text: data.text,
-                                timestamp: Date.now(),
-                            },
-                        ]);
-                        setPartnerTyping(false);
-                        break;
-
-                    case "typing":
-                        setPartnerTyping(true);
-                        if (partnerTypingTimeoutRef.current)
-                            clearTimeout(partnerTypingTimeoutRef.current);
-                        partnerTypingTimeoutRef.current = setTimeout(
-                            () => setPartnerTyping(false),
-                            2000
-                        );
-                        break;
-
-                    case "reveal_request":
-                        if (revealState === "i_requested") {
+                if (newMessages.length > 0) {
+                    newMessages.forEach((msg: any) => {
+                        console.log("[Blind Connection] 📨 Poll Message:", msg);
+                        if (msg.type === "chat") {
+                            setMessages((prev) => [
+                                ...prev,
+                                {
+                                    id: Math.random().toString(36).substring(2, 15),
+                                    sender: "partner",
+                                    text: msg.text,
+                                    timestamp: msg.timestamp || Date.now(),
+                                },
+                            ]);
+                            setPartnerTyping(false);
+                        } else if (msg.type === "typing") {
+                            setPartnerTyping(true);
+                            if (partnerTypingTimeoutRef.current)
+                                clearTimeout(partnerTypingTimeoutRef.current);
+                            partnerTypingTimeoutRef.current = setTimeout(
+                                () => setPartnerTyping(false),
+                                2000
+                            );
+                        } else if (msg.type === "reveal_request") {
+                            setRevealState((prev) => prev === "i_requested" ? "mutual" : "partner_requested");
+                        } else if (msg.type === "reveal_accept") {
                             setRevealState("mutual");
-                        } else {
-                            setRevealState("partner_requested");
+                        } else if (msg.type === "reveal_data") {
+                            setPartnerRevealData(msg.fields);
+                        } else if (msg.type === "partner_disconnected") {
+                            console.log("[Blind Connection] ⚠️ Partner disconnected");
+                            active = false;
+                            onDisconnected("partner_left");
                         }
-                        break;
-
-                    case "reveal_accept":
-                        setRevealState("mutual");
-                        break;
-
-                    case "reveal_data":
-                        setPartnerRevealData(data.fields);
-                        break;
-
-                    case "partner_disconnected":
-                        console.log("[Blind Connection] ⚠️ Partner disconnected signal received");
-                        shouldReconnect = false; // Don't reconnect if partner actually left
-                        ws?.close();
-                        onDisconnected("partner_left");
-                        break;
+                    });
                 }
-            };
-
-            ws.onclose = (event) => {
-                console.log(`[Blind Connection] 🔴 WS Closed: Code=${event.code}`);
-
-                if (shouldReconnect) {
-                    if (retryCount < 50) { // Infinite retries basically, for Vercel
-                        const timeout = Math.min(1000 * (retryCount + 1), 5000);
-                        console.log(`[Blind Connection] ⏳ Reconnecting in ${timeout}ms...`);
-                        reconnectTimeout = setTimeout(() => {
-                            retryCount++;
-                            connect();
-                        }, timeout);
-                    } else {
-                        console.error("[Blind Connection] ❌ Max retry attempts reached");
-                        onDisconnected("error");
-                    }
-                }
-            };
-
-            ws.onerror = (error) => {
-                console.error("[Blind Connection] ❌ WS Error:", error);
-                // Don't close here, wait for onclose
-            };
-        };
-
-        connect();
+            } catch (err) {
+                console.error("Poll error:", err);
+            }
+        }, 1000); // Poll every 1 second
 
         return () => {
-            shouldReconnect = false;
-            clearTimeout(reconnectTimeout);
-            if (ws) ws.close();
+            active = false;
+            clearInterval(pollInterval);
+            // Try to leave
+            if (active) { // only if not already disconnected
+                fetch(`${getWsUrl().replace("wss:", "https:")}/chat/leave`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ room_id: roomId, user_id: userId }),
+                    keepalive: true
+                });
+            }
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [roomId]);
+    }, [roomId, userId, onDisconnected]);
 
     const generateId = () => Math.random().toString(36).substring(2, 15);
 
-    const sendMessage = useCallback(() => {
-        if (!input.trim() || !wsRef.current) return;
+    const sendMessage = useCallback(async () => {
+        if (!input.trim()) return;
         const text = input.trim();
         setInput("");
 
-        wsRef.current.send(JSON.stringify({ type: "chat", text }));
-
+        // Optimistic update
         setMessages((prev) => [
             ...prev,
             {
@@ -173,17 +140,32 @@ export default function Chat({
             },
         ]);
 
+        try {
+            await fetch(`${getWsUrl().replace("wss:", "https:")}/chat/send`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ room_id: roomId, user_id: userId, text }),
+            });
+        } catch (err) {
+            console.error("Send error:", err);
+        }
+
         inputRef.current?.focus();
-    }, [input]);
+    }, [input, roomId, userId]);
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         setInput(e.target.value);
 
-        // Send typing indicator (debounced)
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-            wsRef.current.send(JSON.stringify({ type: "typing" }));
-            typingTimeoutRef.current = setTimeout(() => { }, 1000);
+        // Send typing indicator (throttled)
+        if (!typingTimeoutRef.current) {
+            fetch(`${getWsUrl().replace("wss:", "https:")}/chat/typing`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ room_id: roomId, user_id: userId }),
+            });
+            typingTimeoutRef.current = setTimeout(() => {
+                typingTimeoutRef.current = null;
+            }, 2000);
         }
     };
 
@@ -194,20 +176,30 @@ export default function Chat({
         }
     };
 
-    const handleRevealRequest = () => {
-        if (!wsRef.current) return;
+    const handleRevealRequest = async () => {
         if (revealState === "idle") {
-            wsRef.current.send(JSON.stringify({ type: "reveal_request" }));
             setRevealState("i_requested");
+            await fetch(`${getWsUrl().replace("wss:", "https:")}/chat/signal`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ room_id: roomId, user_id: userId, type: "reveal_request" }),
+            });
         } else if (revealState === "partner_requested") {
-            wsRef.current.send(JSON.stringify({ type: "reveal_accept" }));
             setRevealState("mutual");
+            await fetch(`${getWsUrl().replace("wss:", "https:")}/chat/signal`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ room_id: roomId, user_id: userId, type: "reveal_accept" }),
+            });
         }
     };
 
-    const handleSendRevealData = (fields: Record<string, string>) => {
-        if (!wsRef.current) return;
-        wsRef.current.send(JSON.stringify({ type: "reveal_data", fields }));
+    const handleSendRevealData = async (fields: Record<string, string>) => {
+        await fetch(`${getWsUrl().replace("wss:", "https:")}/chat/signal`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ room_id: roomId, user_id: userId, type: "reveal_data", payload: fields }),
+        });
     };
 
     const formatTime = (ts: number) => {

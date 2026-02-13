@@ -251,95 +251,112 @@ async def queue_stats():
 
 # ─── WebSocket Chat with "Mailbox" ──────────────────────────────────────────
 
-@app.websocket("/ws/{room_id}")
-async def websocket_endpoint(websocket: WebSocket, room_id: str):
-    await websocket.accept()
-    
-    # 1. Identify User
-    # We assign a temp WebSocket ID
-    ws_id = str(uuid.uuid4())
-    
-    # 2. Add to room "participants" set for cleanup
-    # We use a set: `room:{id}:p`
-    redis.sadd(f"room:{room_id}:p", ws_id)
-    redis.expire(f"room:{room_id}:p", 3600)
-    
-    # Mailbox Keys
-    # We broadcast to ALL other participants in the room
-    # For a 2-person chat, it's just "the other person"
-    # But since we don't know the other person's WS_ID easily without tracking,
-    # we will use a global room list or just shared polling.
-    
-    # Better approach for Vercel:
-    # Use a shared list `room:{id}:messages`. 
-    # Clients track "last_read_index".
-    # BUT `ws` protocol doesn't support "ack" easily in this loop without custom protocol.
-    
-    # Alternative:
-    # Use `pubsub` equivalent via list.
-    # We maintain 2 lists: `mailbox:{room_id}:1` and `mailbox:{room_id}:2`? No too complex.
-    
-    # SHARED LIST approach:
-    # All messages go to `room:{id}:msgs`.
-    # Each consumer reads everything and filters out their own?
-    # Or just `lpop`? No, `lpop` deletes it for the other.
-    
-    # Let's use the explicit "Participant List" approach.
-    # 1. Get all participants: `smembers room:{room_id}:p`
-    # 2. Deliver to `mailbox:{ws_id}`
-    
-    active = True
-    
-    async def poller():
-        """Polls my specific mailbox"""
-        nonlocal active
-        while active:
-            # Check my mailbox
-            # lpop returns None if empty
-            try:
-                msg_str = redis.lpop(f"mailbox:{ws_id}")
-                if msg_str:
-                    await websocket.send_text(msg_str)
-                else:
-                    await asyncio.sleep(0.1) # polling delay
-            except Exception:
-                break
+# ─── HTTP Chat (Polling) ─────────────────────────────────────────────────────
 
-    poll_task = asyncio.create_task(poller())
+class ChatMessage(BaseModel):
+    room_id: str
+    user_id: str
+    text: str
 
-    try:
-        while True:
-            data = await websocket.receive_text()
-            # Broadcast to others
-            participants = redis.smembers(f"room:{room_id}:p")
+@app.post("/chat/send")
+async def send_message(msg: ChatMessage):
+    # Broadcast to others
+    participants = redis.smembers(f"room:{msg.room_id}:p")
+    
+    # Message payload
+    payload = json.dumps({
+        "type": "chat",
+        "text": msg.text,
+        "sender": "partner",
+        "timestamp": int(time.time() * 1000)
+    })
+    
+    for pid in participants:
+        if pid != msg.user_id:
+            # Push to their mailbox
+            redis.rpush(f"mailbox:{pid}", payload)
+            redis.expire(f"mailbox:{pid}", 300)
             
-            for pid in participants:
-                if pid != ws_id:
-                    # Push to their mailbox
-                    redis.rpush(f"mailbox:{pid}", data)
-                    # Set expire on mailbox so it cleans up if they disconnect unexpectedly
-                    redis.expire(f"mailbox:{pid}", 300)
+    return {"status": "sent"}
 
-    except WebSocketDisconnect:
-        active = False
-        # Remove myself
-        redis.srem(f"room:{room_id}:p", ws_id)
-        # Notify others
-        participants = redis.smembers(f"room:{room_id}:p")
-        disconnect_msg = json.dumps({"type": "partner_disconnected"})
-        for pid in participants:
-            if pid != ws_id:
-                redis.rpush(f"mailbox:{pid}", disconnect_msg)
+class PollRequest(BaseModel):
+    room_id: str
+    user_id: str
+
+@app.post("/chat/poll")
+async def poll_messages(req: PollRequest):
+    # 1. Register presence (heartbeat)
+    redis.sadd(f"room:{req.room_id}:p", req.user_id)
+    redis.expire(f"room:{req.room_id}:p", 3600)
+    
+    # 2. Check mailbox
+    # Fetch all messages at once to reduce calls
+    messages = []
+    while True:
+        msg = redis.lpop(f"mailbox:{req.user_id}")
+        if not msg:
+            break
+        messages.append(json.loads(msg))
         
-        # Cleanup my mailbox
-        redis.delete(f"mailbox:{ws_id}")
+    return {"messages": messages} # Empty list if nothing
+
+class LeaveRequest(BaseModel):
+    room_id: str
+    user_id: str
+
+@app.post("/chat/leave")
+async def leave_chat(req: LeaveRequest):
+    # Remove myself
+    redis.srem(f"room:{req.room_id}:p", req.user_id)
+    redis.delete(f"mailbox:{req.user_id}")
+    
+    # Notify others
+    participants = redis.smembers(f"room:{req.room_id}:p")
+    disconnect_msg = json.dumps({"type": "partner_disconnected"})
+    
+    for pid in participants:
+        redis.rpush(f"mailbox:{pid}", disconnect_msg)
         
-        # If room empty, delete room metadata (save memory!)
-        if redis.scard(f"room:{room_id}:p") == 0:
-            redis.delete(f"room:{room_id}")
-            redis.delete(f"room:{room_id}:p")
-            # Also clean queues if any left
+    # If room empty, delete room
+    if redis.scard(f"room:{req.room_id}:p") == 0:
+        redis.delete(f"room:{req.room_id}")
+        redis.delete(f"room:{req.room_id}:p")
+        
+    return {"status": "left"}
+
+# Typing indicator
+@app.post("/chat/typing")
+async def send_typing(req: PollRequest): # Reuse PollRequest since it has room_id & user_id
+    participants = redis.smembers(f"room:{req.room_id}:p")
+    payload = json.dumps({"type": "typing"})
+    
+    for pid in participants:
+        if pid != req.user_id:
+            redis.rpush(f"mailbox:{pid}", payload)
+            redis.expire(f"mailbox:{pid}", 300)
             
-    finally:
-        active = False
-        poll_task.cancel()
+    return {"status": "ok"}
+    
+# Reveal logic (generic signal)
+class SignalRequest(BaseModel):
+    room_id: str
+    user_id: str
+    type: str # "reveal_request", "reveal_accept", "reveal_data"
+    payload: Optional[dict] = None
+
+@app.post("/chat/signal")
+async def send_signal(req: SignalRequest):
+    participants = redis.smembers(f"room:{req.room_id}:p")
+    
+    data = {"type": req.type}
+    if req.payload:
+        data["fields"] = req.payload # flatten for frontend compat
+        
+    msg_str = json.dumps(data)
+    
+    for pid in participants:
+        if pid != req.user_id:
+            redis.rpush(f"mailbox:{pid}", msg_str)
+            redis.expire(f"mailbox:{pid}", 300)
+            
+    return {"status": "ok"}
