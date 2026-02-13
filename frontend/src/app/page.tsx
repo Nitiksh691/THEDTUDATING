@@ -42,6 +42,7 @@ export default function Home() {
   const [errorMsg, setErrorMsg] = useState("");
   const [stats, setStats] = useState<Stats | null>(null);
   const [disconnectReason, setDisconnectReason] = useState<"partner_left" | "error" | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Poll for stats
   useEffect(() => {
@@ -61,6 +62,10 @@ export default function Home() {
   }, []);
 
   const handleEnter = async (topicToUse?: string) => {
+    // Guard against double-submit
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+
     const topic = (topicToUse || topicInput).trim();
     setTopicInput(topic);
     setErrorMsg("");
@@ -86,6 +91,7 @@ export default function Home() {
         setPhase("chat");
       } else if (data.status === "error") {
         setErrorMsg("Please enter a valid topic.");
+        setIsSubmitting(false);
       } else {
         console.log(`[DD Dating] ⏳ Waiting in queue. Codename: ${data.codename}, QueueID: ${data.queue_id}`);
         setCodename(data.codename);
@@ -94,6 +100,7 @@ export default function Home() {
       }
     } catch {
       setErrorMsg("Failed to connect to server. Is the backend running?");
+      setIsSubmitting(false);
     }
   };
 
@@ -117,6 +124,7 @@ export default function Home() {
     setQueueId("");
     setErrorMsg("");
     setDisconnectReason(null);
+    setIsSubmitting(false);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -360,11 +368,12 @@ export default function Home() {
                 {/* CTA Button */}
                 <motion.button
                   onClick={() => handleEnter()}
+                  disabled={isSubmitting}
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
-                  className="w-full py-4 rounded-xl font-bold text-base tracking-wide bg-gradient-to-r from-rose-600 to-orange-600 text-white shadow-rose-900/20 hover:shadow-rose-900/40 hover:brightness-110 transition-all duration-300 cursor-pointer shadow-lg"
+                  className={`w-full py-4 rounded-xl font-bold text-base tracking-wide bg-gradient-to-r from-rose-600 to-orange-600 text-white shadow-rose-900/20 hover:shadow-rose-900/40 hover:brightness-110 transition-all duration-300 cursor-pointer shadow-lg ${isSubmitting ? 'opacity-50 cursor-not-allowed' : ''}`}
                 >
-                  {topicInput ? `Find ${topicInput} Partners` : "Surprise Me (Any Topic)"} →
+                  {isSubmitting ? "Searching..." : (topicInput ? `Find ${topicInput} Partners` : "Surprise Me (Any Topic) →")}
                 </motion.button>
               </div>
             </div>
