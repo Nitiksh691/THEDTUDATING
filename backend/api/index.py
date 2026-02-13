@@ -23,6 +23,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.get("/")
+def read_root():
+    return {"message": "Blind Connection Backend is Running!", "docs": "/docs"}
+
+
 # ─── In-Memory State ─────────────────────────────────────────────────────────
 
 # Common stop words to ignore when matching topics
