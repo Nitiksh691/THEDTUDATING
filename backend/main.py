@@ -238,17 +238,33 @@ async def queue_stats():
     top_topics = []
     
     for k in keys:
+        # Count ONLY entries with valid heartbeats (actually alive users)
         length = redis.llen(k)
-        waiting_count += length
+        alive_count = 0
+        # Peek at all entries without removing them (lrange)
+        entries = redis.lrange(k, 0, -1)
+        for entry_str in entries:
+            try:
+                entry = json.loads(entry_str)
+                if redis.exists(f"user:{entry['id']}:heartbeat"):
+                    alive_count += 1
+            except Exception:
+                pass
+        
+        waiting_count += alive_count
         topic_name = k.replace("queue:", "").title()
-        if length > 0:
-            top_topics.append({"topic": topic_name, "count": length})
+        if alive_count > 0:
+            top_topics.append({"topic": topic_name, "count": alive_count})
             
     top_topics.sort(key=lambda x: x["count"], reverse=True)
     
-    # Only count actual room keys, NOT room:{id}:p (participant sets)
-    room_keys = redis.keys("room:*")
-    active_rooms = len([k for k in room_keys if ":p" not in k])
+    # Count rooms that have active participants (at least 1 person polling)
+    participant_keys = redis.keys("room:*:p")
+    active_rooms = 0
+    for pk in participant_keys:
+        member_count = redis.scard(pk)
+        if member_count > 0:
+            active_rooms += 1
     
     return {
         "total_online": waiting_count + (active_rooms * 2),
