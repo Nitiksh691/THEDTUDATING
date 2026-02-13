@@ -1,0 +1,371 @@
+"use client";
+
+import { useEffect, useRef, useState, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import RevealCard from "./RevealCard";
+
+const getWsUrl = () => {
+    if (typeof window !== "undefined") {
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        return process.env.NEXT_PUBLIC_WS_URL || `${protocol}//${window.location.hostname}:8000`;
+    }
+    return "ws://localhost:8000";
+};
+
+interface ChatProps {
+    roomId: string;
+    codename: string;
+    partnerCodename: string;
+    onDisconnected: (reason?: "partner_left" | "error" | null) => void;
+}
+
+interface Message {
+    id: string;
+    sender: "me" | "partner";
+    text: string;
+    timestamp: number;
+}
+
+export default function Chat({
+    roomId,
+    codename,
+    partnerCodename,
+    onDisconnected,
+}: ChatProps) {
+    const [messages, setMessages] = useState<Message[]>([]);
+    const [input, setInput] = useState("");
+    const [partnerTyping, setPartnerTyping] = useState(false);
+    const [revealState, setRevealState] = useState<
+        "idle" | "i_requested" | "partner_requested" | "mutual"
+    >("idle");
+    const [partnerRevealData, setPartnerRevealData] = useState<Record<string, string> | null>(null);
+
+    const wsRef = useRef<WebSocket | null>(null);
+    const messagesEndRef = useRef<HTMLDivElement>(null);
+    const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const partnerTypingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    const scrollToBottom = () => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    };
+
+    useEffect(() => {
+        scrollToBottom();
+    }, [messages, partnerTyping]);
+
+    // WebSocket connection
+    useEffect(() => {
+        const ws = new WebSocket(`${getWsUrl()}/ws/${roomId}`);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+            console.log("[Blind Connection] 🟢 WS Connected to room:", roomId);
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            console.log("[Blind Connection] 📨 WS Message:", data);
+
+            switch (data.type) {
+                case "chat":
+                    setMessages((prev) => [
+                        ...prev,
+                        {
+                            id: Math.random().toString(36).substring(2, 15),
+                            sender: "partner",
+                            text: data.text,
+                            timestamp: Date.now(),
+                        },
+                    ]);
+                    setPartnerTyping(false);
+                    break;
+
+                case "typing":
+                    setPartnerTyping(true);
+                    if (partnerTypingTimeoutRef.current)
+                        clearTimeout(partnerTypingTimeoutRef.current);
+                    partnerTypingTimeoutRef.current = setTimeout(
+                        () => setPartnerTyping(false),
+                        2000
+                    );
+                    break;
+
+                case "reveal_request":
+                    if (revealState === "i_requested") {
+                        setRevealState("mutual");
+                    } else {
+                        setRevealState("partner_requested");
+                    }
+                    break;
+
+                case "reveal_accept":
+                    setRevealState("mutual");
+                    break;
+
+                case "reveal_data":
+                    setPartnerRevealData(data.fields);
+                    break;
+
+                case "partner_disconnected":
+                    console.log("[Blind Connection] ⚠️ Partner disconnected signal received");
+                    onDisconnected("partner_left");
+                    break;
+            }
+        };
+
+        ws.onclose = (event) => {
+            console.log(`[Blind Connection] 🔴 WS Closed: Code=${event.code}, Reason=${event.reason}`);
+            // If explicit close or error, could pass "error". For now default (null) is generic "lost connection".
+            // But if we already called onDisconnected("partner_left"), this might be redundant?
+            // The parent handles state change, so subsequent calls are ignored if component unmounts.
+            onDisconnected();
+        };
+
+        ws.onerror = (error) => {
+            console.error("[Blind Connection] ❌ WS Error:", error);
+            onDisconnected("error");
+        };
+
+        return () => {
+            ws.close();
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [roomId]);
+
+    const generateId = () => Math.random().toString(36).substring(2, 15);
+
+    const sendMessage = useCallback(() => {
+        if (!input.trim() || !wsRef.current) return;
+        const text = input.trim();
+        setInput("");
+
+        wsRef.current.send(JSON.stringify({ type: "chat", text }));
+
+        setMessages((prev) => [
+            ...prev,
+            {
+                id: generateId(),
+                sender: "me",
+                text,
+                timestamp: Date.now(),
+            },
+        ]);
+
+        inputRef.current?.focus();
+    }, [input]);
+
+    const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        setInput(e.target.value);
+
+        // Send typing indicator (debounced)
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+            wsRef.current.send(JSON.stringify({ type: "typing" }));
+            typingTimeoutRef.current = setTimeout(() => { }, 1000);
+        }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    };
+
+    const handleRevealRequest = () => {
+        if (!wsRef.current) return;
+        if (revealState === "idle") {
+            wsRef.current.send(JSON.stringify({ type: "reveal_request" }));
+            setRevealState("i_requested");
+        } else if (revealState === "partner_requested") {
+            wsRef.current.send(JSON.stringify({ type: "reveal_accept" }));
+            setRevealState("mutual");
+        }
+    };
+
+    const handleSendRevealData = (fields: Record<string, string>) => {
+        if (!wsRef.current) return;
+        wsRef.current.send(JSON.stringify({ type: "reveal_data", fields }));
+    };
+
+    const formatTime = (ts: number) => {
+        const d = new Date(ts);
+        return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    };
+
+    return (
+        <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 flex flex-col bg-[var(--bg)]"
+        >
+            {/* Header */}
+            <div className="glass-strong rounded-none border-x-0 border-t-0 px-4 sm:px-6 py-3 flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-full bg-gradient-to-br from-[var(--accent)] to-[var(--accent-green)] flex items-center justify-center text-xs font-bold text-black">
+                        ?
+                    </div>
+                    <div>
+                        <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                            {partnerCodename}
+                        </h3>
+                        <p className="text-[10px] text-[var(--accent-green)] flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent-green)] inline-block" />
+                            Connected
+                        </p>
+                    </div>
+                </div>
+
+                <button
+                    onClick={handleRevealRequest}
+                    disabled={revealState === "i_requested" || revealState === "mutual"}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-300 cursor-pointer
+            ${revealState === "idle"
+                            ? "bg-[var(--accent)]/20 text-[var(--accent-light)] hover:bg-[var(--accent)]/30 border border-[var(--accent)]/30"
+                            : revealState === "partner_requested"
+                                ? "bg-[var(--accent-green)]/20 text-[var(--accent-green)] hover:bg-[var(--accent-green)]/30 border border-[var(--accent-green)]/30 animate-pulse"
+                                : revealState === "i_requested"
+                                    ? "bg-white/5 text-[var(--text-secondary)] border border-white/10"
+                                    : "bg-[var(--accent-green)]/20 text-[var(--accent-green)] border border-[var(--accent-green)]/30"
+                        }`}
+                >
+                    {revealState === "idle"
+                        ? "🔓 Request Reveal"
+                        : revealState === "i_requested"
+                            ? "⏳ Waiting..."
+                            : revealState === "partner_requested"
+                                ? "✨ Reveal Yours Too"
+                                : "✅ Revealed"}
+                </button>
+            </div>
+
+            {/* Partner requested banner */}
+            <AnimatePresence>
+                {revealState === "partner_requested" && (
+                    <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: "auto", opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        className="overflow-hidden"
+                    >
+                        <div className="bg-[var(--accent-green)]/10 border-b border-[var(--accent-green)]/20 px-4 py-2 text-center text-xs text-[var(--accent-green)]">
+                            ✨ Partner wants to share their info — click &quot;Reveal Yours
+                            Too&quot; to unlock!
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* Reveal Card */}
+            <AnimatePresence>
+                {revealState === "mutual" && (
+                    <RevealCard
+                        partnerCodename={partnerCodename}
+                        partnerData={partnerRevealData}
+                        onSendData={handleSendRevealData}
+                    />
+                )}
+            </AnimatePresence>
+
+            {/* Messages Area */}
+            <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 space-y-3">
+                {/* System message */}
+                <div className="text-center py-4">
+                    <div className="inline-block glass px-4 py-2 text-[10px] text-[var(--text-secondary)]">
+                        🔒 You&apos;re connected with{" "}
+                        <span className="text-[var(--accent-light)] font-medium">
+                            {partnerCodename}
+                        </span>
+                        . Messages are never stored.
+                    </div>
+                </div>
+
+                {messages.map((msg) => (
+                    <motion.div
+                        key={msg.id}
+                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        transition={{ duration: 0.2 }}
+                        className={`flex ${msg.sender === "me" ? "justify-end" : "justify-start"}`}
+                    >
+                        <div
+                            className={`max-w-[80%] sm:max-w-[65%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed
+                ${msg.sender === "me"
+                                    ? "bg-gradient-to-r from-[#7c3aed] to-[#6d28d9] text-white rounded-br-md"
+                                    : "bg-white/[0.06] border border-white/[0.08] text-[var(--text-primary)] rounded-bl-md"
+                                }`}
+                        >
+                            <p>{msg.text}</p>
+                            <p
+                                className={`text-[10px] mt-1 ${msg.sender === "me" ? "text-white/50" : "text-[var(--text-secondary)]"
+                                    }`}
+                            >
+                                {formatTime(msg.timestamp)}
+                            </p>
+                        </div>
+                    </motion.div>
+                ))}
+
+                {/* Typing Indicator */}
+                <AnimatePresence>
+                    {partnerTyping && (
+                        <motion.div
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 10 }}
+                            className="flex justify-start"
+                        >
+                            <div className="bg-white/[0.06] border border-white/[0.08] rounded-2xl rounded-bl-md px-4 py-3 flex items-center gap-1.5">
+                                <span className="w-2 h-2 rounded-full bg-[var(--accent-light)] typing-dot" />
+                                <span className="w-2 h-2 rounded-full bg-[var(--accent-light)] typing-dot" />
+                                <span className="w-2 h-2 rounded-full bg-[var(--accent-light)] typing-dot" />
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
+                <div ref={messagesEndRef} />
+            </div>
+
+            {/* Input Bar */}
+            <div className="shrink-0 px-3 sm:px-6 py-3 sm:py-4 border-t border-white/[0.06]">
+                <div className="flex items-center gap-2 max-w-3xl mx-auto">
+                    <input
+                        ref={inputRef}
+                        type="text"
+                        value={input}
+                        onChange={handleInputChange}
+                        onKeyDown={handleKeyDown}
+                        placeholder="Type a message..."
+                        className="flex-1 px-4 py-3 rounded-xl bg-white/[0.04] border border-white/[0.08] 
+              text-sm text-[var(--text-primary)] placeholder-[var(--text-secondary)]
+              focus:outline-none focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/10
+              transition-all duration-200"
+                    />
+                    <motion.button
+                        onClick={sendMessage}
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        disabled={!input.trim()}
+                        className={`p-3 rounded-xl transition-all duration-200 cursor-pointer
+              ${input.trim()
+                                ? "bg-gradient-to-r from-[#7c3aed] to-[#6d28d9] text-white shadow-lg shadow-purple-500/20"
+                                : "bg-white/[0.05] text-[var(--text-secondary)]"
+                            }`}
+                    >
+                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
+                            />
+                        </svg>
+                    </motion.button>
+                </div>
+            </div>
+        </motion.div>
+    );
+}
