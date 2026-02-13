@@ -61,8 +61,9 @@ def _codename() -> str:
 
 def add_to_queue(topic: str, user_data: dict):
     # Store user data as JSON in a list
-    # Use lpush to add to wait list
     redis.rpush(f"queue:{topic}", json.dumps(user_data))
+    # Set initial heartbeat for queue entry (30s TTL)
+    redis.setex(f"user:{user_data['id']}:heartbeat", 30, "1")
 
 def find_match_in_queue(topic: str, my_gender: str, my_pref: str) -> Optional[dict]:
     # Check length
@@ -71,9 +72,8 @@ def find_match_in_queue(topic: str, my_gender: str, my_pref: str) -> Optional[di
     if length == 0:
         return None
     
-    # Iterate (Upstash REST doesn't support complex Lua easily, so we mimic logic)
-    # We pop head. If match, return. If not, push back.
-    # Limit to checking 10 people to avoid slow requests
+    # Iterate through potential matches
+    # We check up to 10 candidates to find a valid, alive one
     for _ in range(min(length, 10)):
         data_str = redis.lpop(key)
         if not data_str:
@@ -81,6 +81,11 @@ def find_match_in_queue(topic: str, my_gender: str, my_pref: str) -> Optional[di
             
         partner = json.loads(data_str)
         
+        # Check Heartbeat (Is user still waiting?)
+        if not redis.exists(f"user:{partner['id']}:heartbeat"):
+            # Zombie! Discard and continue loop (effectively cleaning queue)
+            continue
+            
         # Check compatibility
         partner_gender = partner["gender"]
         partner_pref = partner["preference"]
@@ -91,7 +96,8 @@ def find_match_in_queue(topic: str, my_gender: str, my_pref: str) -> Optional[di
         if match_me and match_them:
             return partner
         else:
-            # Not a match, push back
+            # Not a match, push back and keep their heartbeat alive for a moment 
+            # (or let them refresh it via check-match)
             redis.rpush(key, data_str)
             
     return None
@@ -218,6 +224,10 @@ async def check_match(req: CheckMatchRequest):
             partner_codename=partner_user["codename"],
         )
     
+    # Refresh my heart beat in queue
+    # Only if not matched yet
+    redis.expire(f"user:{req.queue_id}:heartbeat", 30)
+    
     return CheckMatchResponse(status="waiting")
 
 
@@ -230,7 +240,7 @@ async def queue_stats():
     top_topics = []
     
     for k in keys:
-        length = redis.llen(k)
+        length = redis.llen(k) # Note: Limit accuracy because of zombies, but zombies expire
         waiting_count += length
         topic_name = k.replace("queue:", "").title()
         if length > 0:
