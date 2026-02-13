@@ -5,9 +5,6 @@ import { motion, AnimatePresence } from "framer-motion";
 import RevealCard from "./RevealCard";
 
 const getWsUrl = () => {
-    if (typeof window !== "undefined") {
-        return process.env.NEXT_PUBLIC_WS_URL || "wss://thedtudating-xqwf.vercel.app";
-    }
     return "wss://thedtudating-xqwf.vercel.app";
 };
 

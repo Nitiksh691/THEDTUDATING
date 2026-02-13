@@ -7,9 +7,6 @@ import Chat from "@/components/Chat";
 import Disconnected from "@/components/Disconnected";
 
 const getApiUrl = () => {
-  if (typeof window !== "undefined") {
-    return process.env.NEXT_PUBLIC_API_URL || "https://thedtudating-xqwf.vercel.app";
-  }
   return "https://thedtudating-xqwf.vercel.app";
 };
 
