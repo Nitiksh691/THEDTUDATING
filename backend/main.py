@@ -233,14 +233,12 @@ async def check_match(req: CheckMatchRequest):
 
 @app.get("/queue-stats")
 async def queue_stats():
-    # Helper to get keys with pattern (expensive but ok for mvp)
-    # Upstash REST: 'keys' command
     keys = redis.keys("queue:*")
     waiting_count = 0
     top_topics = []
     
     for k in keys:
-        length = redis.llen(k) # Note: Limit accuracy because of zombies, but zombies expire
+        length = redis.llen(k)
         waiting_count += length
         topic_name = k.replace("queue:", "").title()
         if length > 0:
@@ -248,8 +246,9 @@ async def queue_stats():
             
     top_topics.sort(key=lambda x: x["count"], reverse=True)
     
+    # Only count actual room keys, NOT room:{id}:p (participant sets)
     room_keys = redis.keys("room:*")
-    active_rooms = len(room_keys)
+    active_rooms = len([k for k in room_keys if ":p" not in k])
     
     return {
         "total_online": waiting_count + (active_rooms * 2),
@@ -257,6 +256,43 @@ async def queue_stats():
         "active_chat_users": active_rooms * 2,
         "top_topics": top_topics[:10]
     }
+
+
+@app.post("/admin/flush")
+async def flush_all():
+    """Flush ALL stale data from Redis. Use this to reset the system."""
+    # Delete all queues
+    queue_keys = redis.keys("queue:*")
+    for k in queue_keys:
+        redis.delete(k)
+    
+    # Delete all rooms
+    room_keys = redis.keys("room:*")
+    for k in room_keys:
+        redis.delete(k)
+    
+    # Delete all mailboxes
+    mailbox_keys = redis.keys("mailbox:*")
+    for k in mailbox_keys:
+        redis.delete(k)
+    
+    # Delete all match notifications
+    match_keys = redis.keys("match:*")
+    for k in match_keys:
+        redis.delete(k)
+    
+    # Delete all heartbeats
+    hb_keys = redis.keys("user:*")
+    for k in hb_keys:
+        redis.delete(k)
+    
+    return {"status": "flushed", "deleted": {
+        "queues": len(queue_keys),
+        "rooms": len(room_keys),
+        "mailboxes": len(mailbox_keys),
+        "matches": len(match_keys),
+        "heartbeats": len(hb_keys),
+    }}
 
 
 # ─── WebSocket Chat with "Mailbox" ──────────────────────────────────────────
