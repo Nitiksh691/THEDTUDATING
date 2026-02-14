@@ -253,14 +253,14 @@ def _queue_key(topic: str, gender: str, preference: str) -> str:
 
 def add_to_queue(topic: str, user_id: str, user_data: dict, gender: str, preference: str):
     """Add a user to both specific and global queue sets."""
-    # Specific Topic Queue
+    # Specific Topic Queue (ZSET: score=timestamp)
     key_specific = _queue_key(topic, gender, preference)
-    redis.sadd(key_specific, user_id)
+    redis.zadd(key_specific, {user_id: time.time()})
     redis.expire(key_specific, ROOM_TTL)
     
-    # Global Fallback Queue
+    # Global Fallback Queue (ZSET: score=timestamp)
     key_global = f"queue:global:{gender}:{preference}"
-    redis.sadd(key_global, user_id)
+    redis.zadd(key_global, {user_id: time.time()})
     redis.expire(key_global, ROOM_TTL)
 
     # Store user data separately with TTL
@@ -278,9 +278,9 @@ def add_to_queue(topic: str, user_id: str, user_data: dict, gender: str, prefere
 def remove_from_queue(topic: str, user_id: str, gender: str, preference: str):
     """Remove a user from their queue Sets."""
     # Remove from specific
-    redis.srem(_queue_key(topic, gender, preference), user_id)
+    redis.zrem(_queue_key(topic, gender, preference), user_id)
     # Remove from global
-    redis.srem(f"queue:global:{gender}:{preference}", user_id)
+    redis.zrem(f"queue:global:{gender}:{preference}", user_id)
     
     redis.delete(f"user:{user_id}:data")
     redis.delete(f"user:{user_id}:heartbeat")
@@ -289,7 +289,7 @@ def remove_from_queue(topic: str, user_id: str, gender: str, preference: str):
 
 
 def find_match_in_queue(topic: str, my_gender: str, my_pref: str) -> Optional[dict]:
-    """Find a compatible match using Set-based O(1) lookups."""
+    """Find a compatible match using Sorted Set FIFO lookups."""
     all_genders = ["male", "female", "other"]
 
     # Build list of compatible queue keys to check
@@ -308,60 +308,128 @@ def find_match_in_queue(topic: str, my_gender: str, my_pref: str) -> Optional[di
     # Dedupe keys
     keys_to_check = list(dict.fromkeys(keys_to_check))
 
-    # Add global fallback keys if we are looking for a specific topic
-    if topic != "random":
-        fallback_keys = []
-        if my_pref == "any":
-            for g in all_genders:
-                fallback_keys.append(f"queue:global:{g}:{my_gender}")
-                fallback_keys.append(f"queue:global:{g}:any")
-        else:
-            fallback_keys.append(f"queue:global:{my_pref}:{my_gender}")
-            fallback_keys.append(f"queue:global:{my_pref}:any")
-        
-        # Dedupe fallback keys and extend
-        fallback_keys = list(dict.fromkeys(fallback_keys))
-        keys_to_check.extend(fallback_keys)
+    # Add global fallback keys for EVERYONE (including "random" topic)
+    # This ensures that if no specific match is found, we match with ANYONE available.
+    fallback_keys = []
+    if my_pref == "any":
+        for g in all_genders:
+            fallback_keys.append(f"queue:global:{g}:{my_gender}")
+            fallback_keys.append(f"queue:global:{g}:any")
+    else:
+        fallback_keys.append(f"queue:global:{my_pref}:{my_gender}")
+        fallback_keys.append(f"queue:global:{my_pref}:any")
+    
+    # Dedupe fallback keys and extend
+    fallback_keys = list(dict.fromkeys(fallback_keys))
+    keys_to_check.extend(fallback_keys)
 
+    # ─── PHASE 1: Compatible Search (FIFO) ───
     for key in keys_to_check:
-        # Try up to 5 candidates per key (in case some are zombies)
-        for _ in range(5):
-            user_id = redis.spop(key)
-            if not user_id:
-                break  # Empty set, move to next key
-
-            # Check heartbeat — is this user still alive?
+        # PEEK at the oldest user (lowest score) -> zrange(key, 0, 0)
+        # We try to claim the first valid user we see.
+        candidates = redis.zrange(key, 0, 4) # Get top 5 oldest to avoid zombie lock issues
+        
+        for user_id in candidates:
+            # Heartbeat check
             if not redis.exists(f"user:{user_id}:heartbeat"):
-                # Zombie! Clean up their data and continue
+                redis.zrem(key, user_id)
                 redis.delete(f"user:{user_id}:data")
                 continue
 
-            # GET data first
             data_str = redis.get(f"user:{user_id}:data")
             if not data_str:
-                # Data expired but heartbeat somehow alive — skip
+                redis.zrem(key, user_id)
                 continue
 
-            # ATOMIC CLAIM: Try to delete the data key. 
-            # If we delete it, we own the match. If not, someone else matched them.
-            if redis.delete(f"user:{user_id}:data") == 0:
-                 # Already taken by another process
-                 continue
+            # Atomic claim: Try to remove from ZSET. 
+            # If we remove it, we own it. (ZREM returns number of removed elements)
+            if redis.zrem(key, user_id) == 0:
+                continue
             
-            # We won!
+            # Winner
             redis.delete(f"user:{user_id}:heartbeat")
             heartbeat_cache.pop(user_id, None)
-            
             partner = json.loads(data_str)
             
-            # CRITICAL: Remove from ALL queues to prevent them being popped again
+            # Remove from other queues (since user is in both specific and global)
             p_topic = partner.get("topic", "random")
             p_gender = partner.get("gender", "any")
             p_pref = partner.get("preference", "any")
             
-            redis.srem(_queue_key(p_topic, p_gender, p_pref), user_id)
-            redis.srem(f"queue:global:{p_gender}:{p_pref}", user_id)
+            # Cleanup global/specific dual entry
+            # If we matched via specific, remove global. If via global, remove specific.
+            redis.zrem(_queue_key(p_topic, p_gender, p_pref), user_id)
+            redis.zrem(f"queue:global:{p_gender}:{p_pref}", user_id)
             
+            return partner
+
+    # ─── PHASE 2: Desperate Search (The "Super Good" Algorithm) ───
+    # Find ANYONE waiting > 10s.
+    # Score is timestamp. We want score < (now - 10).
+    cutoff_time = time.time() - 10
+    
+    all_global_keys = []
+    genders = ["male", "female", "other"]
+    prefs = ["male", "female", "other", "any"]
+    
+    for g in genders:
+        for p in prefs:
+            all_global_keys.append(f"queue:global:{g}:{p}")
+    
+    # Filter out keys we already checked in Phase 1 (optimization)
+    phase2_keys = [k for k in all_global_keys if k not in keys_to_check]
+
+    # Collect all eligible desperate users from these keys
+    # To be "super good" and random, we collect candidates then pick one.
+    # But for efficiency, we can just iterate and pick the first valid one, 
+    # OR picking randomly from the FIRST key that has candidates might be enough randomness due to key order?
+    # Actually user wants "random person", not just the oldest.
+    
+    # Let's try to find a pool of desperate users.
+    desperate_pool = []
+    
+    for key in phase2_keys:
+        # Get users with score -inf to cutoff_time
+        # We limit to 2 per key to keep pool manageable but diverse
+        # Use offset/count for Upstash Redis client pagination
+        users = redis.zrangebyscore(key, "-inf", cutoff_time, offset=0, count=2)
+        for uid in users:
+            desperate_pool.append((uid, key))
+            
+    if desperate_pool:
+        # Pick one randomly!
+        import random
+        random.shuffle(desperate_pool)
+        
+        for user_id, key in desperate_pool:
+             # Heartbeat check
+            if not redis.exists(f"user:{user_id}:heartbeat"):
+                redis.zrem(key, user_id)
+                redis.delete(f"user:{user_id}:data")
+                continue
+
+            data_str = redis.get(f"user:{user_id}:data")
+            if not data_str:
+                redis.zrem(key, user_id)
+                continue
+                
+            # Atomic claim via ZREM
+            if redis.zrem(key, user_id) == 0:
+                continue
+
+            # We won!
+            redis.delete(f"user:{user_id}:heartbeat")
+            heartbeat_cache.pop(user_id, None)
+            partner = json.loads(data_str)
+            
+            # Cleanup queues
+            p_topic = partner.get("topic", "random")
+            p_gender = partner.get("gender", "any")
+            p_pref = partner.get("preference", "any")
+            redis.zrem(_queue_key(p_topic, p_gender, p_pref), user_id)
+            redis.zrem(f"queue:global:{p_gender}:{p_pref}", user_id)
+            
+            print(f"[MATCH] Found desperate user via {key}")
             return partner
 
     return None

@@ -47,27 +47,7 @@ export default function Home() {
   const [serverDown, setServerDown] = useState(false);
   const [roomType, setRoomType] = useState<"pair" | "group">("pair");
   const [participants, setParticipants] = useState<string[]>([]);
-  const [shareCopied, setShareCopied] = useState(false);
   const failCountRef = useRef(0);
-
-  const handleShare = async () => {
-    const shareText = "yo check this out 😂 anonymous chatting for DTU students, just pick a topic and you get matched with someone random. lowkey fun ngl 👀\n\nhttps://dtudating.live";
-    try {
-      if (navigator.share) {
-        await navigator.share({ title: "DTU Dating", text: shareText, url: "https://dtudating.live" });
-      } else {
-        await navigator.clipboard.writeText(shareText);
-        setShareCopied(true);
-        setTimeout(() => setShareCopied(false), 2500);
-      }
-    } catch {
-      try {
-        await navigator.clipboard.writeText(shareText);
-        setShareCopied(true);
-        setTimeout(() => setShareCopied(false), 2500);
-      } catch { /* ignore */ }
-    }
-  };
 
   // Poll for stats + server health check
   useEffect(() => {
@@ -250,23 +230,6 @@ export default function Home() {
                 Have an idea?
               </span>
             </a>
-          </motion.div>
-
-          {/* Share Button - Top Right */}
-          <motion.div
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="fixed top-4 right-4 z-50"
-          >
-            <button
-              onClick={handleShare}
-              className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 transition-all backdrop-blur-md group cursor-pointer shadow-lg shadow-black/20"
-            >
-              <span className="text-base">{shareCopied ? "✅" : "🔗"}</span>
-              <span className="text-xs font-semibold text-white/70 group-hover:text-white hidden sm:inline-block">
-                {shareCopied ? "Copied!" : "Share"}
-              </span>
-            </button>
           </motion.div>
         </>
       )}
