@@ -48,7 +48,7 @@ export default function Maintenance() {
                 transition={{ delay: 0.5, duration: 0.6 }}
                 className="text-white/50 text-base sm:text-lg font-light text-center max-w-md mb-8 leading-relaxed"
             >
-                DD DTU Dating is under maintenance. We&apos;re making things faster, smoother, and better for you.
+                DTU Dating is under maintenance. We&apos;re making things faster, smoother, and better for you.
             </motion.p>
 
             {/* Status card */}

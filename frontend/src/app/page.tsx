@@ -165,7 +165,7 @@ export default function Home() {
           className="fixed top-4 right-4 z-50"
         >
           <a
-            href="mailto:nitikshpal@gmail.com?subject=Idea for DD DTU Dating"
+            href="mailto:nitikshpal@gmail.com?subject=Idea for  DTU Dating"
             className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 border border-white/10 hover:bg-white/20 transition-all backdrop-blur-md group shadow-lg shadow-black/20"
           >
             <span className="text-lg">💡</span>
@@ -200,7 +200,7 @@ export default function Home() {
             </div>
 
             <h1 className="text-5xl sm:text-7xl font-black mb-6 tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-white via-white to-white/50 drop-shadow-sm">
-              DD DTU Dating
+              DTU Dating
             </h1>
 
             <p className="text-white/60 text-lg sm:text-xl font-light tracking-wide max-w-sm mx-auto mb-8 leading-relaxed">

@@ -8,6 +8,10 @@ const getWsUrl = () => {
     return "wss://thedtudating.onrender.com";
 };
 
+const getApiUrl = () => {
+    return "https://thedtudating.onrender.com";
+};
+
 interface ChatProps {
     roomId: string;
     codename: string;
@@ -50,85 +54,83 @@ export default function Chat({
         scrollToBottom();
     }, [messages, partnerTyping]);
 
-    // Warn on refresh/close
-    useEffect(() => {
-        const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-            e.preventDefault();
-            e.returnValue = "";
-        };
-        window.addEventListener("beforeunload", handleBeforeUnload);
-        return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-    }, []);
-
-    // HTTP Polling Logic
+    // HTTP Long Polling Logic
     useEffect(() => {
         let active = true;
-        const pollInterval = setInterval(async () => {
+        let timeoutId: NodeJS.Timeout;
+
+        const poll = async () => {
             if (!active) return;
             try {
-                const res = await fetch(`${getWsUrl().replace("wss:", "https:")}/chat/poll`, {
+                const res = await fetch(`${getApiUrl()}/chat/poll`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ room_id: roomId, user_id: userId }),
                 });
 
-                if (!res.ok) return;
+                if (res.ok) {
+                    const data = await res.json();
+                    const newMessages = data.messages || [];
 
-                const data = await res.json();
-                const newMessages = data.messages || [];
-
-                if (newMessages.length > 0) {
-                    newMessages.forEach((msg: any) => {
-                        console.log("[Blind Connection] 📨 Poll Message:", msg);
-                        if (msg.type === "chat") {
-                            setMessages((prev) => [
-                                ...prev,
-                                {
-                                    id: Math.random().toString(36).substring(2, 15),
-                                    sender: "partner",
-                                    text: msg.text,
-                                    timestamp: msg.timestamp || Date.now(),
-                                },
-                            ]);
-                            setPartnerTyping(false);
-                        } else if (msg.type === "typing") {
-                            setPartnerTyping(true);
-                            if (partnerTypingTimeoutRef.current)
-                                clearTimeout(partnerTypingTimeoutRef.current);
-                            partnerTypingTimeoutRef.current = setTimeout(
-                                () => setPartnerTyping(false),
-                                2000
-                            );
-                        } else if (msg.type === "reveal_request") {
-                            setRevealState((prev) => prev === "i_requested" ? "mutual" : "partner_requested");
-                        } else if (msg.type === "reveal_accept") {
-                            setRevealState("mutual");
-                        } else if (msg.type === "reveal_data") {
-                            setPartnerRevealData(msg.fields);
-                        } else if (msg.type === "partner_disconnected") {
-                            console.log("[Blind Connection] ⚠️ Partner disconnected");
-                            active = false;
-                            onDisconnected("partner_left");
-                        }
-                    });
+                    if (newMessages.length > 0) {
+                        newMessages.forEach((msg: any) => {
+                            console.log("[Blind Connection] 📨 Poll Message:", msg);
+                            if (msg.type === "chat") {
+                                setMessages((prev) => [
+                                    ...prev,
+                                    {
+                                        id: Math.random().toString(36).substring(2, 15),
+                                        sender: "partner",
+                                        text: msg.text,
+                                        timestamp: msg.timestamp || Date.now(),
+                                    },
+                                ]);
+                                setPartnerTyping(false);
+                            } else if (msg.type === "typing") {
+                                setPartnerTyping(true);
+                                if (partnerTypingTimeoutRef.current)
+                                    clearTimeout(partnerTypingTimeoutRef.current);
+                                partnerTypingTimeoutRef.current = setTimeout(
+                                    () => setPartnerTyping(false),
+                                    2000
+                                );
+                            } else if (msg.type === "reveal_request") {
+                                setRevealState((prev) => prev === "i_requested" ? "mutual" : "partner_requested");
+                            } else if (msg.type === "reveal_accept") {
+                                setRevealState("mutual");
+                            } else if (msg.type === "reveal_data") {
+                                setPartnerRevealData(msg.fields);
+                            } else if (msg.type === "partner_disconnected") {
+                                console.log("[Blind Connection] ⚠️ Partner disconnected");
+                                active = false;
+                                onDisconnected("partner_left");
+                            }
+                        });
+                    }
                 }
             } catch (err) {
                 console.error("Poll error:", err);
+                // Wait slightly longer on error before retry
+                if (active) timeoutId = setTimeout(poll, 2000);
+                return;
             }
-        }, 1000); // Poll every 1 second
+
+            // Immediately poll again if active (for long polling effect)
+            if (active) timeoutId = setTimeout(poll, 100);
+        };
+
+        poll();
 
         return () => {
             active = false;
-            clearInterval(pollInterval);
+            if (timeoutId) clearTimeout(timeoutId);
             // Try to leave
-            if (active) { // only if not already disconnected
-                fetch(`${getWsUrl().replace("wss:", "https:")}/chat/leave`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ room_id: roomId, user_id: userId }),
-                    keepalive: true
-                });
-            }
+            fetch(`${getApiUrl()}/chat/leave`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ room_id: roomId, user_id: userId }),
+                keepalive: true
+            });
         };
     }, [roomId, userId, onDisconnected]);
 
