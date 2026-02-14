@@ -448,22 +448,19 @@ def create_room(room_id: str, topic: str, users: list, room_type: str = "pair", 
     })
 
     # Pipeline ensures all operations go in one round-trip
-    pipe = redis.pipeline()
-    pipe.set(f"room:{room_id}", room_data)
-    pipe.expire(f"room:{room_id}", ROOM_TTL)
+    # Pipeline removed as Upstash HTTP client does not support it
+    # Execute sequentially (safe for small batch)
+    redis.set(f"room:{room_id}", room_data)
+    redis.expire(f"room:{room_id}", ROOM_TTL)
     
     # Initialize participants set
     participant_ids = [u["id"] for u in users]
     if participant_ids:
-        pipe.sadd(f"room:{room_id}:p", *participant_ids)
-        pipe.expire(f"room:{room_id}:p", ROOM_TTL)
+        redis.sadd(f"room:{room_id}:p", *participant_ids)
+        redis.expire(f"room:{room_id}:p", ROOM_TTL)
 
     for u in users:
-        pipe.setex(f"match:{u['id']}", MATCH_TTL, room_id)
-        # Also initialize heartbeat/presence so they don't look offline immediately
-        # (Though poll_messages handles this, it's good for consistency)
-    
-    pipe.exec()
+        redis.setex(f"match:{u['id']}", MATCH_TTL, room_id)
 
 
 # ─── REST Endpoints ──────────────────────────────────────────────────────────
