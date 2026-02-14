@@ -4,7 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import { motion } from "framer-motion";
 
 const getApiUrl = () => {
-    return "https://thedtudating-xqwf.vercel.app";
+    return "https://thedtudating.onrender.com";
 };
 
 interface WaitingRoomProps {

@@ -34,8 +34,9 @@ def read_root():
 
 # ─── Redis & State ───────────────────────────────────────────────────────────
 
-UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL", "https://exact-tiger-55861.upstash.io")
-UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "Ado1AAIncDI4MTQ3ZDNmNWE2ODY0YjRjYjlmMzE1OGU2ZWZlNzI3MXAyNTU4NjE")
+# Configured for Render & Upstash
+UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL", "https://flying-cardinal-56580.upstash.io")
+UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "Ad0EAAIncDI3ODE0YjU1MmNlZDI0NDIzOWVlNGRhM2ZmYTdiYTNlZXAyNTY1ODA")
 ADMIN_KEY = os.getenv("ADMIN_KEY", "default-dev-key")
 
 redis = Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN)
@@ -58,6 +59,13 @@ MATCH_TTL = 300
 # Mailbox TTL (5 minutes)
 MAILBOX_TTL = 300
 
+# In-memory caches to reduce Redis load
+# (Valid for single-instance deployments like Render Free Tier)
+stats_cache = {
+    "data": None,
+    "time": 0
+}
+heartbeat_cache: Dict[str, float] = {}
 
 def _codename() -> str:
     return f"Subject #{random.randint(100, 999)}"
@@ -76,21 +84,6 @@ def normalize_topic(raw: str) -> str:
 
 # ─── Redis Helpers (Set-Based Queue) ─────────────────────────────────────────
 
-# KEY DESIGN:
-#   queue:{topic}:{gender}:{preference}  → Redis SET of user IDs
-#   user:{id}:data                       → JSON blob with user info (TTL = QUEUE_TTL)
-#   user:{id}:heartbeat                  → "1" (TTL = QUEUE_TTL)
-#
-# Example: A male user looking for females in topic "football":
-#   SADD queue:football:male:female  <user_id>
-#
-# To find a match for them, we check:
-#   queue:football:female:male   (females looking for males)
-#   queue:football:female:any    (females open to any)
-# And if the user's preference is "any":
-#   queue:football:male:any, queue:football:female:any, queue:football:other:any, etc.
-
-
 def _queue_key(topic: str, gender: str, preference: str) -> str:
     """Build the Redis Set key for a specific queue bucket."""
     return f"queue:{topic}:{gender}:{preference}"
@@ -106,6 +99,8 @@ def add_to_queue(topic: str, user_id: str, user_data: dict, gender: str, prefere
     redis.setex(f"user:{user_id}:data", QUEUE_TTL, json.dumps(user_data))
     # Set heartbeat
     redis.setex(f"user:{user_id}:heartbeat", QUEUE_TTL, "1")
+    # Cache heartbeat initially
+    heartbeat_cache[user_id] = time.time()
 
 
 def remove_from_queue(topic: str, user_id: str, gender: str, preference: str):
@@ -114,19 +109,12 @@ def remove_from_queue(topic: str, user_id: str, gender: str, preference: str):
     redis.srem(key, user_id)
     redis.delete(f"user:{user_id}:data")
     redis.delete(f"user:{user_id}:heartbeat")
+    # Clean up local cache
+    heartbeat_cache.pop(user_id, None)
 
 
 def find_match_in_queue(topic: str, my_gender: str, my_pref: str) -> Optional[dict]:
-    """Find a compatible match using Set-based O(1) lookups.
-
-    A male looking for female checks:
-      queue:{topic}:female:male   — females specifically looking for males
-      queue:{topic}:female:any    — females open to anyone
-    
-    A user looking for "any" checks all genders:
-      queue:{topic}:male:any, queue:{topic}:female:any, queue:{topic}:other:any
-      queue:{topic}:male:{my_gender}, queue:{topic}:female:{my_gender}, etc.
-    """
+    """Find a compatible match using Set-based O(1) lookups."""
     all_genders = ["male", "female", "other"]
 
     # Build list of compatible queue keys to check
@@ -168,6 +156,7 @@ def find_match_in_queue(topic: str, my_gender: str, my_pref: str) -> Optional[di
             # Clean up their queue data (they're matched now)
             redis.delete(f"user:{user_id}:data")
             redis.delete(f"user:{user_id}:heartbeat")
+            heartbeat_cache.pop(user_id, None)
             return partner
 
     return None
@@ -298,8 +287,14 @@ async def check_match(req: CheckMatchRequest):
         )
 
     # Refresh heartbeat + user data TTL (they're still alive and waiting)
-    redis.expire(f"user:{req.queue_id}:heartbeat", QUEUE_TTL)
-    redis.expire(f"user:{req.queue_id}:data", QUEUE_TTL)
+    # OPTIMIZATION: Only update Redis every 10 seconds to save commands
+    now = time.time()
+    last_update = heartbeat_cache.get(req.queue_id, 0)
+    
+    if now - last_update > 10:
+        redis.expire(f"user:{req.queue_id}:heartbeat", QUEUE_TTL)
+        redis.expire(f"user:{req.queue_id}:data", QUEUE_TTL)
+        heartbeat_cache[req.queue_id] = now
 
     return CheckMatchResponse(status="waiting")
 
@@ -321,10 +316,15 @@ async def leave_queue(req: QueueLeaveRequest):
     return {"status": "removed"}
 
 
-# ─── Queue Stats (efficient Set-based) ──────────────────────────────────────
+# ─── Queue Stats (efficient Set-based + cached) ─────────────────────────────
 
 @app.get("/queue-stats")
 async def queue_stats():
+    # OPTIMIZATION: Cache stats for 10 seconds to reduce Redis load
+    now = time.time()
+    if stats_cache["data"] and (now - stats_cache["time"] < 10):
+        return stats_cache["data"]
+
     keys = redis.keys("queue:*")
     waiting_count = 0
     topic_counts: Dict[str, int] = {}
@@ -357,12 +357,18 @@ async def queue_stats():
         if member_count > 0:
             active_rooms += 1
 
-    return {
+    result = {
         "total_online": waiting_count + (active_rooms * 2),
         "waiting_count": waiting_count,
         "active_chat_users": active_rooms * 2,
         "top_topics": top_topics[:10],
     }
+    
+    # Update cache
+    stats_cache["data"] = result
+    stats_cache["time"] = now
+    
+    return result
 
 
 # ─── Admin (Protected) ──────────────────────────────────────────────────────
@@ -373,33 +379,14 @@ async def flush_all(x_admin_key: str = Header(None)):
     if x_admin_key != ADMIN_KEY:
         raise HTTPException(status_code=403, detail="Forbidden: invalid admin key")
 
-    queue_keys = redis.keys("queue:*")
-    for k in queue_keys:
-        redis.delete(k)
+    # Clear Redis
+    redis.flushdb()
+    
+    # Clear local caches
+    stats_cache["data"] = None
+    heartbeat_cache.clear()
 
-    room_keys = redis.keys("room:*")
-    for k in room_keys:
-        redis.delete(k)
-
-    mailbox_keys = redis.keys("mailbox:*")
-    for k in mailbox_keys:
-        redis.delete(k)
-
-    match_keys = redis.keys("match:*")
-    for k in match_keys:
-        redis.delete(k)
-
-    user_keys = redis.keys("user:*")
-    for k in user_keys:
-        redis.delete(k)
-
-    return {"status": "flushed", "deleted": {
-        "queues": len(queue_keys),
-        "rooms": len(room_keys),
-        "mailboxes": len(mailbox_keys),
-        "matches": len(match_keys),
-        "users": len(user_keys),
-    }}
+    return {"status": "flushed all"}
 
 
 # ─── HTTP Chat (Polling with Short-Hold) ─────────────────────────────────────
@@ -437,8 +424,14 @@ class PollRequest(BaseModel):
 @app.post("/chat/poll")
 async def poll_messages(req: PollRequest):
     # 1. Register presence (heartbeat for room)
-    redis.sadd(f"room:{req.room_id}:p", req.user_id)
-    redis.expire(f"room:{req.room_id}:p", ROOM_TTL)
+    # OPTIMIZATION: Throttle updates to every 10s
+    now = time.time()
+    last_update = heartbeat_cache.get(req.user_id, 0)
+    
+    if now - last_update > 10:
+        redis.sadd(f"room:{req.room_id}:p", req.user_id)
+        redis.expire(f"room:{req.room_id}:p", ROOM_TTL)
+        heartbeat_cache[req.user_id] = now
 
     # 2. Short-hold polling: wait up to 3 seconds for a message
     #    Check every 500ms — reduces Redis hits by ~3x while keeping latency low
@@ -469,6 +462,7 @@ async def leave_chat(req: LeaveRequest):
     # Remove myself
     redis.srem(f"room:{req.room_id}:p", req.user_id)
     redis.delete(f"mailbox:{req.user_id}")
+    heartbeat_cache.pop(req.user_id, None)
 
     # Notify others
     participants = redis.smembers(f"room:{req.room_id}:p")

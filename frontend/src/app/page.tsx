@@ -8,7 +8,7 @@ import Disconnected from "@/components/Disconnected";
 import Maintenance from "@/components/Maintenance";
 
 const getApiUrl = () => {
-  return "https://thedtudating-xqwf.vercel.app";
+  return "https://thedtudating.onrender.com";
 };
 
 const SUGGESTIONS = [

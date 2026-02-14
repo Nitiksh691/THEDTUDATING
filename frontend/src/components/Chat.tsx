@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import RevealCard from "./RevealCard";
 
 const getWsUrl = () => {
-    return "wss://thedtudating-xqwf.vercel.app";
+    return "wss://thedtudating.onrender.com";
 };
 
 interface ChatProps {
