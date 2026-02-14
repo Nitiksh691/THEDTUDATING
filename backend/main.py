@@ -252,23 +252,36 @@ def _queue_key(topic: str, gender: str, preference: str) -> str:
 
 
 def add_to_queue(topic: str, user_id: str, user_data: dict, gender: str, preference: str):
-    """Add a user to the appropriate queue Set."""
-    key = _queue_key(topic, gender, preference)
-    # Add to the Set
-    redis.sadd(key, user_id)
-    redis.expire(key, ROOM_TTL)  # Keep the set alive for a while
+    """Add a user to both specific and global queue sets."""
+    # Specific Topic Queue
+    key_specific = _queue_key(topic, gender, preference)
+    redis.sadd(key_specific, user_id)
+    redis.expire(key_specific, ROOM_TTL)
+    
+    # Global Fallback Queue
+    key_global = f"queue:global:{gender}:{preference}"
+    redis.sadd(key_global, user_id)
+    redis.expire(key_global, ROOM_TTL)
+
     # Store user data separately with TTL
     redis.setex(f"user:{user_id}:data", QUEUE_TTL, json.dumps(user_data))
     # Set heartbeat
     redis.setex(f"user:{user_id}:heartbeat", QUEUE_TTL, "1")
+    # Codename → user mapping for direct match lookups
+    redis.setex(f"codename:{user_data['codename']}", QUEUE_TTL, json.dumps({
+        "user_id": user_id, "topic": topic, "gender": gender, "preference": preference
+    }))
     # Cache heartbeat initially
     heartbeat_cache[user_id] = time.time()
 
 
 def remove_from_queue(topic: str, user_id: str, gender: str, preference: str):
-    """Remove a user from their queue Set."""
-    key = _queue_key(topic, gender, preference)
-    redis.srem(key, user_id)
+    """Remove a user from their queue Sets."""
+    # Remove from specific
+    redis.srem(_queue_key(topic, gender, preference), user_id)
+    # Remove from global
+    redis.srem(f"queue:global:{gender}:{preference}", user_id)
+    
     redis.delete(f"user:{user_id}:data")
     redis.delete(f"user:{user_id}:heartbeat")
     # Clean up local cache
@@ -292,8 +305,23 @@ def find_match_in_queue(topic: str, my_gender: str, my_pref: str) -> Optional[di
         keys_to_check.append(_queue_key(topic, my_pref, my_gender))  # they want my gender
         keys_to_check.append(_queue_key(topic, my_pref, "any"))       # they want anyone
 
-    # De-duplicate keys
+    # Dedupe keys
     keys_to_check = list(dict.fromkeys(keys_to_check))
+
+    # Add global fallback keys if we are looking for a specific topic
+    if topic != "random":
+        fallback_keys = []
+        if my_pref == "any":
+            for g in all_genders:
+                fallback_keys.append(f"queue:global:{g}:{my_gender}")
+                fallback_keys.append(f"queue:global:{g}:any")
+        else:
+            fallback_keys.append(f"queue:global:{my_pref}:{my_gender}")
+            fallback_keys.append(f"queue:global:{my_pref}:any")
+        
+        # Dedupe fallback keys and extend
+        fallback_keys = list(dict.fromkeys(fallback_keys))
+        keys_to_check.extend(fallback_keys)
 
     for key in keys_to_check:
         # Try up to 5 candidates per key (in case some are zombies)
@@ -308,36 +336,65 @@ def find_match_in_queue(topic: str, my_gender: str, my_pref: str) -> Optional[di
                 redis.delete(f"user:{user_id}:data")
                 continue
 
-            # Get user data
+            # GET data first
             data_str = redis.get(f"user:{user_id}:data")
             if not data_str:
                 # Data expired but heartbeat somehow alive — skip
                 continue
 
-            partner = json.loads(data_str)
-            # Clean up their queue data (they're matched now)
-            redis.delete(f"user:{user_id}:data")
+            # ATOMIC CLAIM: Try to delete the data key. 
+            # If we delete it, we own the match. If not, someone else matched them.
+            if redis.delete(f"user:{user_id}:data") == 0:
+                 # Already taken by another process
+                 continue
+            
+            # We won!
             redis.delete(f"user:{user_id}:heartbeat")
             heartbeat_cache.pop(user_id, None)
+            
+            partner = json.loads(data_str)
+            
+            # CRITICAL: Remove from ALL queues to prevent them being popped again
+            p_topic = partner.get("topic", "random")
+            p_gender = partner.get("gender", "any")
+            p_pref = partner.get("preference", "any")
+            
+            redis.srem(_queue_key(p_topic, p_gender, p_pref), user_id)
+            redis.srem(f"queue:global:{p_gender}:{p_pref}", user_id)
+            
             return partner
 
     return None
 
 
-def create_room(room_id: str, topic: str, user1: dict, user2: dict):
+def create_room(room_id: str, topic: str, users: list, room_type: str = "pair", max_size: int = 2):
     """Create a room atomically using pipeline."""
     room_data = json.dumps({
         "topic": topic,
-        "users": [user1, user2],
-        "active": True
+        "type": room_type,
+        "max_size": max_size,
+        "users": users,
+        "active": True,
+        "open": room_type == "group",
+        "created_at": int(time.time())
     })
 
     # Pipeline ensures all operations go in one round-trip
     pipe = redis.pipeline()
     pipe.set(f"room:{room_id}", room_data)
     pipe.expire(f"room:{room_id}", ROOM_TTL)
-    pipe.setex(f"match:{user1['id']}", MATCH_TTL, room_id)
-    pipe.setex(f"match:{user2['id']}", MATCH_TTL, room_id)
+    
+    # Initialize participants set
+    participant_ids = [u["id"] for u in users]
+    if participant_ids:
+        pipe.sadd(f"room:{room_id}:p", *participant_ids)
+        pipe.expire(f"room:{room_id}:p", ROOM_TTL)
+
+    for u in users:
+        pipe.setex(f"match:{u['id']}", MATCH_TTL, room_id)
+        # Also initialize heartbeat/presence so they don't look offline immediately
+        # (Though poll_messages handles this, it's good for consistency)
+    
     pipe.exec()
 
 
@@ -348,11 +405,13 @@ class MatchRequest(BaseModel):
     interest: str
     gender: str = "any"
     preference: str = "any"
+    nickname: str = "Anonymous"
 
 
 class MatchResponse(BaseModel):
     status: str
     room_id: Optional[str] = None
+    user_id: Optional[str] = None
     codename: Optional[str] = None
     partner_codename: Optional[str] = None
     queue_id: Optional[str] = None
@@ -362,10 +421,14 @@ class MatchResponse(BaseModel):
 @app.post("/match", response_model=MatchResponse)
 async def match(req: MatchRequest):
     raw_topic = req.interest.strip()
+    # If empty topic ("Surprise Me"), use a default bucket
     if not raw_topic:
-        return MatchResponse(status="error")
+        raw_topic = "random"
 
     topic = normalize_topic(raw_topic)
+    if not topic:
+        topic = "random"
+
     gender = req.gender.lower()
     pref = req.preference.lower()
 
@@ -380,12 +443,13 @@ async def match(req: MatchRequest):
         room_id = str(uuid.uuid4())
 
         create_room(room_id, topic,
-                     {"id": my_id, "codename": my_codename},
-                     partner)
+                     [{"id": my_id, "codename": my_codename},
+                      partner])
 
         return MatchResponse(
             status="matched",
             room_id=room_id,
+            user_id=my_id,
             codename=my_codename,
             partner_codename=partner["codename"],
             matched_topic=topic,
@@ -397,12 +461,15 @@ async def match(req: MatchRequest):
             "codename": my_codename,
             "gender": gender,
             "preference": pref,
+            "nickname": req.nickname[:20] if req.nickname else "Anonymous",
             "topic": topic,
+            "joined_at": int(time.time()),
         }
         add_to_queue(topic, my_id, user_data, gender, pref)
 
         return MatchResponse(
             status="waiting",
+            user_id=my_id,
             codename=my_codename,
             queue_id=my_id,
         )
@@ -474,8 +541,224 @@ class QueueLeaveRequest(BaseModel):
 async def leave_queue(req: QueueLeaveRequest):
     """Actively remove a user from the queue when they cancel."""
     topic = normalize_topic(req.interest)
+    if not topic:
+        topic = "random"
     remove_from_queue(topic, req.queue_id, req.gender.lower(), req.preference.lower())
     return {"status": "removed"}
+
+
+# ─── Browse & Direct Match ───────────────────────────────────────────────────
+
+@app.get("/queue/browse")
+async def browse_queue():
+    """Return a list of waiting users (codename, topic, wait time) for browsing."""
+    keys = redis.keys("queue:*")
+    people: List[dict] = []
+    seen_ids: set = set()
+    now = int(time.time())
+
+    for k in keys:
+        if ":p" in k:
+            continue
+
+        members = redis.smembers(k)
+        for user_id in members:
+            if user_id in seen_ids:
+                continue
+            seen_ids.add(user_id)
+
+            # Check heartbeat
+            if not redis.exists(f"user:{user_id}:heartbeat"):
+                continue
+
+            data_str = redis.get(f"user:{user_id}:data")
+            if not data_str:
+                continue
+
+            data = json.loads(data_str)
+            joined = data.get("joined_at", now)
+            people.append({
+                "codename": data["codename"],
+                "topic": data.get("topic", "random").title(),
+                "gender": data.get("gender", "any"),
+                "nickname": data.get("nickname", "Anonymous"),
+                "waiting_seconds": now - joined,
+            })
+
+    # Sort by longest waiting first
+    people.sort(key=lambda p: p["waiting_seconds"], reverse=True)
+    return {"people": people[:50]}
+
+
+class DirectMatchRequest(BaseModel):
+    codename: str
+    my_gender: str = "any"
+    my_preference: str = "any"
+
+
+@app.post("/match/direct")
+async def direct_match(req: DirectMatchRequest):
+    """Match with a specific user by their codename."""
+    mapping_str = redis.get(f"codename:{req.codename}")
+    if not mapping_str:
+        return {"status": "not_found", "message": "User no longer available"}
+
+    mapping = json.loads(mapping_str)
+    partner_id = mapping["user_id"]
+    partner_topic = mapping["topic"]
+    partner_gender = mapping["gender"]
+    partner_pref = mapping["preference"]
+
+    # Verify partner is still alive
+    if not redis.exists(f"user:{partner_id}:heartbeat"):
+        redis.delete(f"codename:{req.codename}")
+        return {"status": "not_found", "message": "User no longer available"}
+
+    partner_data_str = redis.get(f"user:{partner_id}:data")
+    if not partner_data_str:
+        return {"status": "not_found", "message": "User no longer available"}
+
+    partner_data = json.loads(partner_data_str)
+
+    # Remove partner from their queue
+    remove_from_queue(partner_topic, partner_id, partner_gender, partner_pref)
+    redis.delete(f"codename:{req.codename}")
+
+    # Create room
+    my_id = str(uuid.uuid4())
+    my_codename = _codename()
+    room_id = str(uuid.uuid4())
+
+    create_room(room_id, partner_topic,
+                [{"id": my_id, "codename": my_codename},
+                 {"id": partner_id, "codename": partner_data["codename"]}])
+
+    return {
+        "status": "matched",
+        "room_id": room_id,
+        "user_id": my_id,
+        "codename": my_codename,
+        "partner_codename": partner_data["codename"],
+        "matched_topic": partner_topic,
+    }
+
+
+# ─── Group Chat ──────────────────────────────────────────────────────────────
+
+GROUP_MAX_SIZE = 8
+
+class GroupMatchRequest(BaseModel):
+    interest: str
+    gender: str = "any"
+    preference: str = "any"
+    max_size: int = 5
+
+
+@app.post("/match-group")
+async def match_group(req: GroupMatchRequest):
+    """Join or create a group chat room for a topic."""
+    raw_topic = req.interest.strip()
+    if not raw_topic:
+        raw_topic = "random"
+    topic = normalize_topic(raw_topic)
+    if not topic:
+        topic = "random"
+
+    max_size = min(req.max_size, GROUP_MAX_SIZE)
+    my_id = str(uuid.uuid4())
+    my_codename = _codename()
+
+    # Look for existing open group rooms with this topic
+    group_key = f"group:{topic}"
+    existing_room_id = redis.get(group_key)
+
+    if existing_room_id:
+        # Try to join existing room
+        room_data_str = redis.get(f"room:{existing_room_id}")
+        if room_data_str:
+            room_data = json.loads(room_data_str)
+            if room_data.get("open") and len(room_data["users"]) < room_data.get("max_size", 5):
+                # Join this room
+                room_data["users"].append({"id": my_id, "codename": my_codename})
+                redis.set(f"room:{existing_room_id}", json.dumps(room_data))
+                redis.expire(f"room:{existing_room_id}", ROOM_TTL)
+                redis.setex(f"match:{my_id}", MATCH_TTL, existing_room_id)
+
+                # Notify existing participants
+                participants = redis.smembers(f"room:{existing_room_id}:p")
+                join_msg = json.dumps({
+                    "type": "user_joined",
+                    "codename": my_codename,
+                    "participant_count": len(room_data["users"])
+                })
+                for pid in participants:
+                    redis.rpush(f"mailbox:{pid}", join_msg)
+                    redis.expire(f"mailbox:{pid}", MAILBOX_TTL)
+
+                return {
+                    "status": "joined",
+                    "room_id": existing_room_id,
+                    "user_id": my_id,
+                    "codename": my_codename,
+                    "room_type": "group",
+                    "participants": [u["codename"] for u in room_data["users"]],
+                    "matched_topic": topic,
+                }
+
+    # Create new group room
+    room_id = str(uuid.uuid4())
+    create_room(room_id, topic,
+                [{"id": my_id, "codename": my_codename}],
+                room_type="group", max_size=max_size)
+
+    # Track this as the open group for the topic
+    redis.setex(group_key, ROOM_TTL, room_id)
+
+    return {
+        "status": "created",
+        "room_id": room_id,
+        "user_id": my_id,
+        "codename": my_codename,
+        "room_type": "group",
+        "participants": [my_codename],
+        "matched_topic": topic,
+    }
+
+
+@app.post("/group/close")
+async def close_group(room_id: str, user_id: str):
+    """Close a group room so no new members can join."""
+    room_data_str = redis.get(f"room:{room_id}")
+    if not room_data_str:
+        return {"status": "not_found"}
+
+    room_data = json.loads(room_data_str)
+    room_data["open"] = False
+    redis.set(f"room:{room_id}", json.dumps(room_data))
+
+    # Remove from group index
+    topic = room_data.get("topic", "")
+    redis.delete(f"group:{topic}")
+
+    return {"status": "closed"}
+
+
+@app.get("/room/{room_id}/info")
+async def room_info(room_id: str):
+    """Get room info including participants and type."""
+    room_data_str = redis.get(f"room:{room_id}")
+    if not room_data_str:
+        return {"status": "not_found"}
+
+    room_data = json.loads(room_data_str)
+    return {
+        "status": "ok",
+        "topic": room_data.get("topic"),
+        "type": room_data.get("type", "pair"),
+        "participants": [u["codename"] for u in room_data.get("users", [])],
+        "open": room_data.get("open", False),
+        "max_size": room_data.get("max_size", 2),
+    }
 
 
 # ─── Queue Stats (efficient Set-based + cached) ─────────────────────────────
@@ -563,10 +846,22 @@ class ChatMessage(BaseModel):
 async def send_message(msg: ChatMessage):
     participants = redis.smembers(f"room:{msg.room_id}:p")
 
+    # Look up sender codename from room data for group chats
+    sender_codename = "partner"
+    room_data_str = redis.get(f"room:{msg.room_id}")
+    if room_data_str:
+        room_data = json.loads(room_data_str)
+        for u in room_data.get("users", []):
+            if u["id"] == msg.user_id:
+                sender_codename = u["codename"]
+                break
+
     payload = json.dumps({
         "type": "chat",
         "text": msg.text,
         "sender": "partner",
+        "sender_codename": sender_codename,
+        "sender_id": msg.user_id,
         "timestamp": int(time.time() * 1000),
     })
 
@@ -621,6 +916,21 @@ class LeaveRequest(BaseModel):
 
 @app.post("/chat/leave")
 async def leave_chat(req: LeaveRequest):
+    # Look up codename for leave notification
+    leaver_codename = "Someone"
+    room_data_str = redis.get(f"room:{req.room_id}")
+    room_type = "pair"
+    if room_data_str:
+        room_data = json.loads(room_data_str)
+        room_type = room_data.get("type", "pair")
+        for u in room_data.get("users", []):
+            if u["id"] == req.user_id:
+                leaver_codename = u["codename"]
+                break
+        # Remove from room data
+        room_data["users"] = [u for u in room_data["users"] if u["id"] != req.user_id]
+        redis.set(f"room:{req.room_id}", json.dumps(room_data))
+
     # Remove myself
     redis.srem(f"room:{req.room_id}:p", req.user_id)
     redis.delete(f"mailbox:{req.user_id}")
@@ -628,7 +938,14 @@ async def leave_chat(req: LeaveRequest):
 
     # Notify others
     participants = redis.smembers(f"room:{req.room_id}:p")
-    disconnect_msg = json.dumps({"type": "partner_disconnected"})
+    if room_type == "group":
+        disconnect_msg = json.dumps({
+            "type": "user_left",
+            "codename": leaver_codename,
+            "participant_count": len(participants)
+        })
+    else:
+        disconnect_msg = json.dumps({"type": "partner_disconnected"})
 
     for pid in participants:
         redis.rpush(f"mailbox:{pid}", disconnect_msg)
@@ -637,6 +954,12 @@ async def leave_chat(req: LeaveRequest):
     if redis.scard(f"room:{req.room_id}:p") == 0:
         redis.delete(f"room:{req.room_id}")
         redis.delete(f"room:{req.room_id}:p")
+        # Clean up group index
+        if room_data_str:
+            topic = json.loads(room_data_str).get("topic", "")
+            group_key = f"group:{topic}"
+            if redis.get(group_key) == req.room_id:
+                redis.delete(group_key)
 
     return {"status": "left"}
 
@@ -667,9 +990,12 @@ class SignalRequest(BaseModel):
 async def send_signal(req: SignalRequest):
     participants = redis.smembers(f"room:{req.room_id}:p")
 
-    data = {"type": req.type}
+    data: dict = {"type": req.type}
     if req.payload:
-        data["fields"] = req.payload
+        if req.type == "reaction":
+            data.update(req.payload)
+        else:
+            data["fields"] = req.payload
 
     msg_str = json.dumps(data)
 

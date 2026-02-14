@@ -2,10 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { motion } from "framer-motion";
-
-const getApiUrl = () => {
-    return "https://thedtudating.onrender.com";
-};
+import { API_URL } from "@/lib/config";
 
 interface WaitingRoomProps {
     interest: string;
@@ -13,7 +10,7 @@ interface WaitingRoomProps {
     codename: string;
     gender: string;
     preference: string;
-    onMatched: (roomId: string, partnerCodename: string) => void;
+    onMatched: (roomId: string, partnerCodename: string, userId?: string) => void;
     onCancel: () => void;
 }
 
@@ -40,7 +37,7 @@ export default function WaitingRoom({
         pollRef.current = setInterval(async () => {
             if (!queueId) return;
             try {
-                const res = await fetch(`${getApiUrl()}/check-match`, {
+                const res = await fetch(`${API_URL}/check-match`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ interest, queue_id: queueId }),
@@ -49,7 +46,7 @@ export default function WaitingRoom({
                 console.log("[Blind Connection] 🔄 Polling check-match:", data);
                 if (data.status === "matched") {
                     console.log(`[Blind Connection] 🎉 MATCHED! Room: ${data.room_id}, Partner: ${data.partner_codename}`);
-                    onMatched(data.room_id, data.partner_codename);
+                    onMatched(data.room_id, data.partner_codename, queueId);
                 } else if (data.status === "expired") {
                     console.error("[Blind Connection] ❌ Session expired (queue ID invalid).");
                     alert("Your session has expired. Please try connecting again.");
@@ -63,9 +60,9 @@ export default function WaitingRoom({
         // Queue stats
         const fetchStats = async () => {
             try {
-                const res = await fetch(`${getApiUrl()}/queue-stats`);
+                const res = await fetch(`${API_URL}/queue-stats`);
                 const data = await res.json();
-                setTotalWaiting(data.total_waiting);
+                setTotalWaiting(data.waiting_count);
             } catch {
                 // ignore
             }
@@ -83,7 +80,7 @@ export default function WaitingRoom({
     // Active queue cleanup when user cancels
     const handleCancel = async () => {
         try {
-            await fetch(`${getApiUrl()}/queue/leave`, {
+            await fetch(`${API_URL}/queue/leave`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({

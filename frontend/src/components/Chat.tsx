@@ -3,48 +3,67 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import RevealCard from "./RevealCard";
+import { API_URL } from "@/lib/config";
 
-const getWsUrl = () => {
-    return "wss://thedtudating.onrender.com";
-};
-
-const getApiUrl = () => {
-    return "https://thedtudating.onrender.com";
-};
+// ─── Emoji Reactions ───────────────────────────────────────────────────────
+const QUICK_REACTIONS = [
+    // Common
+    "❤️", "😂", "🔥", "👍", "😭",
+    // Uncommon / fun
+    "💀", "🫡", "🗿", "👀", "🤌",
+    "💅", "🫠", "☠️", "🥶", "😈",
+];
 
 interface ChatProps {
     roomId: string;
+    userId: string;
     codename: string;
     partnerCodename: string;
+    roomType?: "pair" | "group";
+    participants?: string[];
     onDisconnected: (reason?: "partner_left" | "error" | null) => void;
+}
+
+interface Reaction {
+    emoji: string;
+    fromMe: boolean;
 }
 
 interface Message {
     id: string;
-    sender: "me" | "partner";
+    sender: "me" | "partner" | "system";
+    senderCodename?: string;
     text: string;
     timestamp: number;
+    reactions: Reaction[];
 }
 
 export default function Chat({
     roomId,
+    userId,
     codename,
     partnerCodename,
+    roomType = "pair",
+    participants: initialParticipants,
     onDisconnected,
 }: ChatProps) {
-    const [userId] = useState(() => Math.random().toString(36).substring(2));
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState("");
     const [partnerTyping, setPartnerTyping] = useState(false);
+    const [participantList, setParticipantList] = useState<string[]>(initialParticipants || [partnerCodename]);
     const [revealState, setRevealState] = useState<
         "idle" | "i_requested" | "partner_requested" | "mutual"
     >("idle");
     const [partnerRevealData, setPartnerRevealData] = useState<Record<string, string> | null>(null);
+    const [activeReactionMsgId, setActiveReactionMsgId] = useState<string | null>(null);
+    const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+    const [floatingReactions, setFloatingReactions] = useState<{ id: string; emoji: string; x: number }[]>([]);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const partnerTypingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const inputRef = useRef<HTMLInputElement>(null);
+    const reactionPickerRef = useRef<HTMLDivElement>(null);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -54,6 +73,17 @@ export default function Chat({
         scrollToBottom();
     }, [messages, partnerTyping]);
 
+    // Close reaction picker on outside click
+    useEffect(() => {
+        const handleClickOutside = (e: MouseEvent) => {
+            if (reactionPickerRef.current && !reactionPickerRef.current.contains(e.target as Node)) {
+                setActiveReactionMsgId(null);
+            }
+        };
+        document.addEventListener("mousedown", handleClickOutside);
+        return () => document.removeEventListener("mousedown", handleClickOutside);
+    }, []);
+
     // HTTP Long Polling Logic
     useEffect(() => {
         let active = true;
@@ -62,7 +92,7 @@ export default function Chat({
         const poll = async () => {
             if (!active) return;
             try {
-                const res = await fetch(`${getApiUrl()}/chat/poll`, {
+                const res = await fetch(`${API_URL}/chat/poll`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ room_id: roomId, user_id: userId }),
@@ -81,8 +111,10 @@ export default function Chat({
                                     {
                                         id: Math.random().toString(36).substring(2, 15),
                                         sender: "partner",
+                                        senderCodename: msg.sender_codename || partnerCodename,
                                         text: msg.text,
                                         timestamp: msg.timestamp || Date.now(),
+                                        reactions: [],
                                     },
                                 ]);
                                 setPartnerTyping(false);
@@ -94,6 +126,18 @@ export default function Chat({
                                     () => setPartnerTyping(false),
                                     2000
                                 );
+                            } else if (msg.type === "reaction") {
+                                // Received a reaction from partner
+                                const { message_id, emoji } = msg;
+                                setMessages((prev) =>
+                                    prev.map((m) =>
+                                        m.id === message_id
+                                            ? { ...m, reactions: [...m.reactions, { emoji, fromMe: false }] }
+                                            : m
+                                    )
+                                );
+                                // Floating reaction animation
+                                spawnFloatingReaction(emoji);
                             } else if (msg.type === "reveal_request") {
                                 setRevealState((prev) => prev === "i_requested" ? "mutual" : "partner_requested");
                             } else if (msg.type === "reveal_accept") {
@@ -104,18 +148,34 @@ export default function Chat({
                                 console.log("[Blind Connection] ⚠️ Partner disconnected");
                                 active = false;
                                 onDisconnected("partner_left");
+                            } else if (msg.type === "user_joined") {
+                                setParticipantList(prev => [...prev, msg.codename]);
+                                setMessages(prev => [...prev, {
+                                    id: Math.random().toString(36).substring(2, 15),
+                                    sender: "system",
+                                    text: `${msg.codename} joined the chat`,
+                                    timestamp: Date.now(),
+                                    reactions: [],
+                                }]);
+                            } else if (msg.type === "user_left") {
+                                setParticipantList(prev => prev.filter(p => p !== msg.codename));
+                                setMessages(prev => [...prev, {
+                                    id: Math.random().toString(36).substring(2, 15),
+                                    sender: "system",
+                                    text: `${msg.codename} left the chat`,
+                                    timestamp: Date.now(),
+                                    reactions: [],
+                                }]);
                             }
                         });
                     }
                 }
             } catch (err) {
                 console.error("Poll error:", err);
-                // Wait slightly longer on error before retry
                 if (active) timeoutId = setTimeout(poll, 2000);
                 return;
             }
 
-            // Immediately poll again if active (for long polling effect)
             if (active) timeoutId = setTimeout(poll, 100);
         };
 
@@ -124,8 +184,7 @@ export default function Chat({
         return () => {
             active = false;
             if (timeoutId) clearTimeout(timeoutId);
-            // Try to leave
-            fetch(`${getApiUrl()}/chat/leave`, {
+            fetch(`${API_URL}/chat/leave`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ room_id: roomId, user_id: userId }),
@@ -136,12 +195,21 @@ export default function Chat({
 
     const generateId = () => Math.random().toString(36).substring(2, 15);
 
+    // Floating reaction animation
+    const spawnFloatingReaction = (emoji: string) => {
+        const id = generateId();
+        const x = 30 + Math.random() * 40; // random x position (30-70% of screen)
+        setFloatingReactions((prev) => [...prev, { id, emoji, x }]);
+        setTimeout(() => {
+            setFloatingReactions((prev) => prev.filter((r) => r.id !== id));
+        }, 2000);
+    };
+
     const sendMessage = useCallback(async () => {
         if (!input.trim()) return;
         const text = input.trim();
         setInput("");
 
-        // Optimistic update
         setMessages((prev) => [
             ...prev,
             {
@@ -149,11 +217,12 @@ export default function Chat({
                 sender: "me",
                 text,
                 timestamp: Date.now(),
+                reactions: [],
             },
         ]);
 
         try {
-            await fetch(`${getWsUrl().replace("wss:", "https:")}/chat/send`, {
+            await fetch(`${API_URL}/chat/send`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ room_id: roomId, user_id: userId, text }),
@@ -165,12 +234,71 @@ export default function Chat({
         inputRef.current?.focus();
     }, [input, roomId, userId]);
 
+    // Send reaction
+    const sendReaction = async (messageId: string, emoji: string) => {
+        // Optimistic update — add my reaction locally
+        setMessages((prev) =>
+            prev.map((m) =>
+                m.id === messageId
+                    ? { ...m, reactions: [...m.reactions, { emoji, fromMe: true }] }
+                    : m
+            )
+        );
+
+        // Floating animation
+        spawnFloatingReaction(emoji);
+
+        // Close picker
+        setActiveReactionMsgId(null);
+
+        // Send to partner via signal
+        try {
+            await fetch(`${API_URL}/chat/signal`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    room_id: roomId,
+                    user_id: userId,
+                    type: "reaction",
+                    payload: { message_id: messageId, emoji },
+                }),
+            });
+        } catch (err) {
+            console.error("Reaction send error:", err);
+        }
+    };
+
+    // Quick emoji send (from emoji bar)
+    const sendQuickEmoji = async (emoji: string) => {
+        setShowEmojiPicker(false);
+
+        setMessages((prev) => [
+            ...prev,
+            {
+                id: generateId(),
+                sender: "me",
+                text: emoji,
+                timestamp: Date.now(),
+                reactions: [],
+            },
+        ]);
+
+        try {
+            await fetch(`${API_URL}/chat/send`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ room_id: roomId, user_id: userId, text: emoji }),
+            });
+        } catch (err) {
+            console.error("Emoji send error:", err);
+        }
+    };
+
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         setInput(e.target.value);
 
-        // Send typing indicator (throttled)
         if (!typingTimeoutRef.current) {
-            fetch(`${getWsUrl().replace("wss:", "https:")}/chat/typing`, {
+            fetch(`${API_URL}/chat/typing`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ room_id: roomId, user_id: userId }),
@@ -191,14 +319,14 @@ export default function Chat({
     const handleRevealRequest = async () => {
         if (revealState === "idle") {
             setRevealState("i_requested");
-            await fetch(`${getWsUrl().replace("wss:", "https:")}/chat/signal`, {
+            await fetch(`${API_URL}/chat/signal`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ room_id: roomId, user_id: userId, type: "reveal_request" }),
             });
         } else if (revealState === "partner_requested") {
             setRevealState("mutual");
-            await fetch(`${getWsUrl().replace("wss:", "https:")}/chat/signal`, {
+            await fetch(`${API_URL}/chat/signal`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ room_id: roomId, user_id: userId, type: "reveal_accept" }),
@@ -207,7 +335,7 @@ export default function Chat({
     };
 
     const handleSendRevealData = async (fields: Record<string, string>) => {
-        await fetch(`${getWsUrl().replace("wss:", "https:")}/chat/signal`, {
+        await fetch(`${API_URL}/chat/signal`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ room_id: roomId, user_id: userId, type: "reveal_data", payload: fields }),
@@ -219,6 +347,21 @@ export default function Chat({
         return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     };
 
+    // Group reactions by emoji for display
+    const groupReactions = (reactions: Reaction[]) => {
+        const map = new Map<string, { count: number; fromMe: boolean }>();
+        reactions.forEach((r) => {
+            const existing = map.get(r.emoji);
+            if (existing) {
+                existing.count++;
+                if (r.fromMe) existing.fromMe = true;
+            } else {
+                map.set(r.emoji, { count: 1, fromMe: r.fromMe });
+            }
+        });
+        return Array.from(map.entries());
+    };
+
     return (
         <motion.div
             initial={{ opacity: 0 }}
@@ -226,19 +369,38 @@ export default function Chat({
             exit={{ opacity: 0 }}
             className="fixed inset-0 flex flex-col bg-[var(--bg)]"
         >
+            {/* Floating Reactions Animation */}
+            <AnimatePresence>
+                {floatingReactions.map((fr) => (
+                    <motion.div
+                        key={fr.id}
+                        initial={{ opacity: 1, y: 0, scale: 1 }}
+                        animate={{ opacity: 0, y: -200, scale: 1.6 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 1.8, ease: "easeOut" }}
+                        className="fixed z-50 text-3xl pointer-events-none"
+                        style={{ bottom: "20%", left: `${fr.x}%` }}
+                    >
+                        {fr.emoji}
+                    </motion.div>
+                ))}
+            </AnimatePresence>
+
             {/* Header */}
             <div className="glass-strong rounded-none border-x-0 border-t-0 px-4 sm:px-6 py-3 flex items-center justify-between shrink-0">
                 <div className="flex items-center gap-3">
                     <div className="w-9 h-9 rounded-full bg-gradient-to-br from-[var(--accent)] to-[var(--accent-green)] flex items-center justify-center text-xs font-bold text-black">
-                        ?
+                        {roomType === "group" ? participantList.length : "?"}
                     </div>
                     <div>
                         <h3 className="text-sm font-semibold text-[var(--text-primary)]">
-                            {partnerCodename}
+                            {roomType === "group" ? "Group Chat" : partnerCodename}
                         </h3>
                         <p className="text-[10px] text-[var(--accent-green)] flex items-center gap-1">
                             <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent-green)] inline-block" />
-                            Connected
+                            {roomType === "group"
+                                ? `${participantList.length + 1} participants`
+                                : "Connected"}
                         </p>
                     </div>
                 </div>
@@ -299,11 +461,14 @@ export default function Chat({
                 {/* System message */}
                 <div className="text-center py-4">
                     <div className="inline-block glass px-4 py-2 text-[10px] text-[var(--text-secondary)]">
-                        🔒 You&apos;re connected with{" "}
-                        <span className="text-[var(--accent-light)] font-medium">
-                            {partnerCodename}
-                        </span>
-                        . Messages are never stored.
+                        🔒 {roomType === "group"
+                            ? `You're in a group chat. ${participantList.length + 1} participants.`
+                            : (<>You&apos;re connected with{" "}
+                                <span className="text-[var(--accent-light)] font-medium">
+                                    {partnerCodename}
+                                </span>
+                                . Messages are never stored.</>)
+                        }
                     </div>
                 </div>
 
@@ -313,23 +478,99 @@ export default function Chat({
                         initial={{ opacity: 0, y: 10, scale: 0.95 }}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         transition={{ duration: 0.2 }}
-                        className={`flex ${msg.sender === "me" ? "justify-end" : "justify-start"}`}
+                        className={`flex ${msg.sender === "me" ? "justify-end" : msg.sender === "system" ? "justify-center" : "justify-start"}`}
                     >
-                        <div
-                            className={`max-w-[80%] sm:max-w-[65%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed
-                ${msg.sender === "me"
-                                    ? "bg-gradient-to-r from-[#7c3aed] to-[#6d28d9] text-white rounded-br-md"
-                                    : "bg-white/[0.06] border border-white/[0.08] text-[var(--text-primary)] rounded-bl-md"
-                                }`}
-                        >
-                            <p>{msg.text}</p>
-                            <p
-                                className={`text-[10px] mt-1 ${msg.sender === "me" ? "text-white/50" : "text-[var(--text-secondary)]"
-                                    }`}
-                            >
-                                {formatTime(msg.timestamp)}
-                            </p>
-                        </div>
+                        {msg.sender === "system" ? (
+                            <div className="glass px-3 py-1 text-[10px] text-[var(--text-secondary)]">
+                                {msg.text}
+                            </div>
+                        ) : (
+                            <div className="relative group/msg max-w-[80%] sm:max-w-[65%]">
+                                {/* Reaction trigger — appears on hover */}
+                                <button
+                                    onClick={() => setActiveReactionMsgId(activeReactionMsgId === msg.id ? null : msg.id)}
+                                    className={`absolute ${msg.sender === "me" ? "-left-8" : "-right-8"} top-1/2 -translate-y-1/2 
+                    w-6 h-6 rounded-full bg-white/[0.06] border border-white/[0.08] 
+                    flex items-center justify-center text-xs
+                    opacity-0 group-hover/msg:opacity-100 transition-opacity duration-200
+                    hover:bg-white/[0.12] cursor-pointer z-10`}
+                                >
+                                    😊
+                                </button>
+
+                                {/* Message Bubble */}
+                                <div
+                                    className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed
+                    ${msg.sender === "me"
+                                            ? "bg-gradient-to-r from-[#7c3aed] to-[#6d28d9] text-white rounded-br-md"
+                                            : "bg-white/[0.06] border border-white/[0.08] text-[var(--text-primary)] rounded-bl-md"
+                                        }`}
+                                >
+                                    {roomType === "group" && msg.sender === "partner" && msg.senderCodename && (
+                                        <p className="text-[10px] font-semibold text-purple-300/70 mb-1">
+                                            {msg.senderCodename}
+                                        </p>
+                                    )}
+                                    <p>{msg.text}</p>
+                                    <p
+                                        className={`text-[10px] mt-1 ${msg.sender === "me" ? "text-white/50" : "text-[var(--text-secondary)]"
+                                            }`}
+                                    >
+                                        {formatTime(msg.timestamp)}
+                                    </p>
+                                </div>
+
+                                {/* Reaction Display */}
+                                {msg.reactions.length > 0 && (
+                                    <div className={`flex flex-wrap gap-1 mt-1 ${msg.sender === "me" ? "justify-end" : "justify-start"}`}>
+                                        {groupReactions(msg.reactions).map(([emoji, data]) => (
+                                            <motion.span
+                                                key={emoji}
+                                                initial={{ scale: 0 }}
+                                                animate={{ scale: 1 }}
+                                                className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-xs
+                          ${data.fromMe
+                                                        ? "bg-purple-500/20 border border-purple-500/30"
+                                                        : "bg-white/[0.06] border border-white/[0.08]"
+                                                    }`}
+                                            >
+                                                <span>{emoji}</span>
+                                                {data.count > 1 && (
+                                                    <span className="text-[10px] text-white/50">{data.count}</span>
+                                                )}
+                                            </motion.span>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {/* Reaction Picker Popup */}
+                                <AnimatePresence>
+                                    {activeReactionMsgId === msg.id && (
+                                        <motion.div
+                                            ref={reactionPickerRef}
+                                            initial={{ opacity: 0, scale: 0.8, y: 5 }}
+                                            animate={{ opacity: 1, scale: 1, y: 0 }}
+                                            exit={{ opacity: 0, scale: 0.8, y: 5 }}
+                                            transition={{ duration: 0.15 }}
+                                            className={`absolute ${msg.sender === "me" ? "right-0" : "left-0"} -top-14 z-20
+                        bg-[#1a1a2e]/95 backdrop-blur-xl border border-white/10 rounded-2xl px-2 py-1.5 
+                        flex items-center gap-0.5 shadow-2xl shadow-black/40`}
+                                        >
+                                            {QUICK_REACTIONS.map((emoji) => (
+                                                <button
+                                                    key={emoji}
+                                                    onClick={() => sendReaction(msg.id, emoji)}
+                                                    className="w-8 h-8 flex items-center justify-center text-lg rounded-lg 
+                            hover:bg-white/10 hover:scale-125 transition-all duration-150 cursor-pointer"
+                                                >
+                                                    {emoji}
+                                                </button>
+                                            ))}
+                                        </motion.div>
+                                    )}
+                                </AnimatePresence>
+                            </div>
+                        )}
                     </motion.div>
                 ))}
 
@@ -356,7 +597,46 @@ export default function Chat({
 
             {/* Input Bar */}
             <div className="shrink-0 px-3 sm:px-6 py-3 sm:py-4 border-t border-white/[0.06]">
+                {/* Emoji Picker Bar (above input) */}
+                <AnimatePresence>
+                    {showEmojiPicker && (
+                        <motion.div
+                            initial={{ opacity: 0, height: 0 }}
+                            animate={{ opacity: 1, height: "auto" }}
+                            exit={{ opacity: 0, height: 0 }}
+                            className="overflow-hidden mb-2 max-w-3xl mx-auto"
+                        >
+                            <div className="flex flex-wrap gap-1 p-2 rounded-xl bg-white/[0.04] border border-white/[0.08]">
+                                {QUICK_REACTIONS.map((emoji) => (
+                                    <button
+                                        key={emoji}
+                                        onClick={() => sendQuickEmoji(emoji)}
+                                        className="w-9 h-9 flex items-center justify-center text-xl rounded-lg 
+                      hover:bg-white/10 hover:scale-110 transition-all duration-150 cursor-pointer"
+                                    >
+                                        {emoji}
+                                    </button>
+                                ))}
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
                 <div className="flex items-center gap-2 max-w-3xl mx-auto">
+                    {/* Emoji Toggle Button */}
+                    <motion.button
+                        onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                        whileHover={{ scale: 1.1 }}
+                        whileTap={{ scale: 0.9 }}
+                        className={`p-3 rounded-xl transition-all duration-200 cursor-pointer shrink-0
+              ${showEmojiPicker
+                                ? "bg-purple-500/20 text-purple-300 border border-purple-500/30"
+                                : "bg-white/[0.05] text-[var(--text-secondary)] hover:bg-white/[0.08]"
+                            }`}
+                    >
+                        <span className="text-lg">😊</span>
+                    </motion.button>
+
                     <input
                         ref={inputRef}
                         type="text"

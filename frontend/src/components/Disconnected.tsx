@@ -4,10 +4,11 @@ import { motion } from "framer-motion";
 
 interface DisconnectedProps {
     onReturnHome: () => void;
+    onFindNew?: () => void;
     reason?: "partner_left" | "error" | null;
 }
 
-export default function Disconnected({ onReturnHome, reason }: DisconnectedProps) {
+export default function Disconnected({ onReturnHome, onFindNew, reason }: DisconnectedProps) {
     const isPartnerLeft = reason === "partner_left";
 
     return (
@@ -57,20 +58,35 @@ export default function Disconnected({ onReturnHome, reason }: DisconnectedProps
                         ? "Your partner has left the chat."
                         : "Connection to the server was lost."}
                 </p>
-                <p className="text-xs text-[var(--accent)] mb-8 font-medium">
+                <p className="text-xs text-[var(--accent)] mb-6 font-medium">
                     🔒 This session has been wiped.
                 </p>
 
-                <motion.button
-                    onClick={onReturnHome}
-                    whileHover={{ scale: 1.03 }}
-                    whileTap={{ scale: 0.97 }}
-                    className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7c3aed] to-[#6d28d9] 
-            text-white font-semibold text-sm shadow-lg shadow-purple-500/25 
-            hover:shadow-purple-500/40 transition-shadow cursor-pointer"
-                >
-                    Return Home
-                </motion.button>
+                <div className="space-y-3">
+                    {onFindNew && (
+                        <motion.button
+                            onClick={onFindNew}
+                            whileHover={{ scale: 1.03 }}
+                            whileTap={{ scale: 0.97 }}
+                            className="w-full py-3.5 rounded-xl bg-gradient-to-r from-rose-600 to-orange-600 
+                text-white font-semibold text-sm shadow-lg shadow-rose-900/25 
+                hover:shadow-rose-900/40 transition-shadow cursor-pointer"
+                        >
+                            🔍 Find New Partner
+                        </motion.button>
+                    )}
+                    <motion.button
+                        onClick={onReturnHome}
+                        whileHover={{ scale: 1.03 }}
+                        whileTap={{ scale: 0.97 }}
+                        className={`w-full py-3.5 rounded-xl ${onFindNew
+                            ? "bg-white/[0.06] border border-white/10 text-white/70 hover:text-white hover:bg-white/10"
+                            : "bg-gradient-to-r from-[#7c3aed] to-[#6d28d9] text-white shadow-lg shadow-purple-500/25 hover:shadow-purple-500/40"
+                            } font-semibold text-sm transition-all cursor-pointer`}
+                    >
+                        Return Home
+                    </motion.button>
+                </div>
             </motion.div>
         </motion.div>
     );

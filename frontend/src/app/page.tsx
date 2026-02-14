@@ -6,10 +6,8 @@ import WaitingRoom from "@/components/WaitingRoom";
 import Chat from "@/components/Chat";
 import Disconnected from "@/components/Disconnected";
 import Maintenance from "@/components/Maintenance";
-
-const getApiUrl = () => {
-  return "https://thedtudating.onrender.com";
-};
+import Link from "next/link";
+import { API_URL } from "@/lib/config";
 
 const SUGGESTIONS = [
   { label: "Deep Talk", emoji: "🧠" },
@@ -36,7 +34,9 @@ export default function Home() {
   const [topicInput, setTopicInput] = useState("");
   const [myGender, setMyGender] = useState("male");
   const [preference, setPreference] = useState("any");
+  const [nickname, setNickname] = useState("");
   const [roomId, setRoomId] = useState("");
+  const [userId, setUserId] = useState("");
   const [codename, setCodename] = useState("");
   const [partnerCodename, setPartnerCodename] = useState("");
   const [queueId, setQueueId] = useState("");
@@ -45,13 +45,35 @@ export default function Home() {
   const [disconnectReason, setDisconnectReason] = useState<"partner_left" | "error" | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [serverDown, setServerDown] = useState(false);
+  const [roomType, setRoomType] = useState<"pair" | "group">("pair");
+  const [participants, setParticipants] = useState<string[]>([]);
+  const [shareCopied, setShareCopied] = useState(false);
   const failCountRef = useRef(0);
+
+  const handleShare = async () => {
+    const shareText = "yo check this out 😂 anonymous chatting for DTU students, just pick a topic and you get matched with someone random. lowkey fun ngl 👀\n\nhttps://dtudating.live";
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: "DTU Dating", text: shareText, url: "https://dtudating.live" });
+      } else {
+        await navigator.clipboard.writeText(shareText);
+        setShareCopied(true);
+        setTimeout(() => setShareCopied(false), 2500);
+      }
+    } catch {
+      try {
+        await navigator.clipboard.writeText(shareText);
+        setShareCopied(true);
+        setTimeout(() => setShareCopied(false), 2500);
+      } catch { /* ignore */ }
+    }
+  };
 
   // Poll for stats + server health check
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const res = await fetch(`${getApiUrl()}/queue-stats`);
+        const res = await fetch(`${API_URL}/queue-stats`);
         if (!res.ok) throw new Error("Server error");
         const data = await res.json();
         setStats(data);
@@ -82,13 +104,14 @@ export default function Home() {
     setErrorMsg("");
     console.log("[DD Dating] 🔍 Searching for topic:", topic, myGender, preference);
     try {
-      const res = await fetch(`${getApiUrl()}/match`, {
+      const res = await fetch(`${API_URL}/match`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           interest: topic,
           gender: myGender,
-          preference: preference
+          preference: preference,
+          nickname: nickname.trim(),
         }),
       });
       const data = await res.json();
@@ -97,6 +120,7 @@ export default function Home() {
       if (data.status === "matched") {
         console.log(`[DD Dating] ✅ Matched! Room: ${data.room_id}, Partner: ${data.partner_codename}`);
         setRoomId(data.room_id);
+        setUserId(data.user_id);
         setCodename(data.codename);
         setPartnerCodename(data.partner_codename);
         setPhase("chat");
@@ -115,8 +139,9 @@ export default function Home() {
     }
   };
 
-  const handleMatched = (roomId: string, partnerCodename: string) => {
+  const handleMatched = (roomId: string, partnerCodename: string, matchedUserId?: string) => {
     setRoomId(roomId);
+    if (matchedUserId) setUserId(matchedUserId);
     setPartnerCodename(partnerCodename);
     setPhase("chat");
   };
@@ -130,12 +155,62 @@ export default function Home() {
     setPhase("hero");
     setTopicInput("");
     setRoomId("");
+    setUserId("");
     setCodename("");
     setPartnerCodename("");
     setQueueId("");
     setErrorMsg("");
     setDisconnectReason(null);
     setIsSubmitting(false);
+    setRoomType("pair");
+    setParticipants([]);
+    setNickname("");
+  };
+
+
+
+  // Group chat handler
+  const handleGroupMatch = async () => {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    const topic = topicInput.trim() || "random";
+    try {
+      const res = await fetch(`${API_URL}/match-group`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          interest: topic,
+          gender: myGender,
+          preference: preference,
+          nickname: nickname.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (data.status === "joined" || data.status === "created") {
+        setRoomId(data.room_id);
+        setUserId(data.user_id);
+        setCodename(data.codename);
+        setPartnerCodename(data.status === "joined" ? "Group" : "Waiting for others...");
+        setRoomType("group");
+        setParticipants(data.participants || []);
+        setPhase("chat");
+      }
+    } catch {
+      setErrorMsg("Failed to join group chat.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Quick re-match from disconnect screen
+  const handleFindNew = () => {
+    setRoomId("");
+    setUserId("");
+    setPartnerCodename("");
+    setDisconnectReason(null);
+    setRoomType("pair");
+    setParticipants([]);
+    setPhase("matching");
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -157,23 +232,43 @@ export default function Home() {
         <div className="absolute bottom-[-20%] right-[-10%] w-[60%] h-[60%] rounded-full bg-blue-900/10 blur-[120px]" />
       </div>
 
-      {/* Suggestion Box - Top Right Fixed */}
+      {/* Top Navigation */}
       {(phase === "hero" || phase === "matching") && (
-        <motion.div
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="fixed top-4 right-4 z-50"
-        >
-          <a
-            href="mailto:nitikshpal@gmail.com?subject=Idea for  DTU Dating"
-            className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 border border-white/10 hover:bg-white/20 transition-all backdrop-blur-md group shadow-lg shadow-black/20"
+        <>
+          {/* Suggestion Box - Top Left */}
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="fixed top-4 left-4 z-50"
           >
-            <span className="text-lg">💡</span>
-            <span className="text-xs font-semibold text-white/80 group-hover:text-white hidden sm:inline-block">
-              Have an idea?
-            </span>
-          </a>
-        </motion.div>
+            <a
+              href="mailto:nitikshpal@gmail.com?subject=Idea for DTU Dating"
+              className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 transition-all backdrop-blur-md group shadow-lg shadow-black/20"
+            >
+              <span className="text-lg">💡</span>
+              <span className="text-xs font-semibold text-white/80 group-hover:text-white hidden sm:inline-block">
+                Have an idea?
+              </span>
+            </a>
+          </motion.div>
+
+          {/* Share Button - Top Right */}
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="fixed top-4 right-4 z-50"
+          >
+            <button
+              onClick={handleShare}
+              className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 transition-all backdrop-blur-md group cursor-pointer shadow-lg shadow-black/20"
+            >
+              <span className="text-base">{shareCopied ? "✅" : "🔗"}</span>
+              <span className="text-xs font-semibold text-white/70 group-hover:text-white hidden sm:inline-block">
+                {shareCopied ? "Copied!" : "Share"}
+              </span>
+            </button>
+          </motion.div>
+        </>
       )}
 
       <AnimatePresence mode="wait">
@@ -233,10 +328,54 @@ export default function Home() {
               Start Matching →
             </motion.button>
 
-            <div className="mt-8 text-center opacity-40 mb-8">
-              <p className="text-[10px] uppercase tracking-widest text-white/60">
+            {/* Stats */}
+            <div className="mt-6 text-center">
+              <p className="text-[10px] uppercase tracking-widest text-white/40">
                 {stats?.waiting_count ?? "-"} Waiting • {stats?.active_chat_users ?? "-"} Chatting
               </p>
+            </div>
+
+
+
+            {/* Connect Section */}
+            <div className="mt-8 flex flex-col items-center gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-white/30">
+                Connect with me
+              </span>
+              <div className="flex gap-3">
+                <a
+                  href="https://www.instagram.com/nitiksh_das?igsh=ZmRhZXcycDJhYXlo&utm_source=qr"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="p-2.5 rounded-xl bg-white/[0.04] border border-white/10 hover:bg-gradient-to-tr hover:from-purple-500/20 hover:to-orange-500/20 hover:border-white/20 transition-all group"
+                  title="Instagram"
+                >
+                  <svg className="w-4 h-4 text-white/60 group-hover:text-white transition-colors" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z" />
+                  </svg>
+                </a>
+                <a
+                  href="https://www.linkedin.com/in/nitiksh-pal-924275274?utm_source=share_via&utm_content=profile&utm_medium=member_ios"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="p-2.5 rounded-xl bg-white/[0.04] border border-white/10 hover:bg-[#0077b5]/20 hover:border-[#0077b5]/40 transition-all group"
+                  title="LinkedIn"
+                >
+                  <svg className="w-4 h-4 text-white/60 group-hover:text-white transition-colors" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M4.98 3.5c0 1.381-1.11 2.5-2.48 2.5s-2.48-1.119-2.48-2.5c0-1.38 1.11-2.5 2.48-2.5s2.48 1.12 2.48 2.5zm.02 4.5h-5v16h5v-16zm7.982 0h-4.968v16h4.969v-8.399c0-4.67 6.029-5.052 6.029 0v8.399h4.988v-10.131c0-7.88-8.922-7.593-11.018-3.714v-2.155z" />
+                  </svg>
+                </a>
+              </div>
+            </div>
+
+            {/* About Us Link */}
+            <div className="text-center mt-8">
+              <Link
+                href="/about"
+                className="text-white/30 hover:text-white/60 text-xs font-medium tracking-wide transition-colors underline underline-offset-4 decoration-white/10 hover:decoration-white/30"
+              >
+                About this project ✨
+              </Link>
             </div>
           </motion.div>
         )}
@@ -300,6 +439,25 @@ export default function Home() {
                         </button>
                       ))}
                     </div>
+                  </div>
+                </div>
+
+                {/* Identity Inputs */}
+                <div className="grid grid-cols-1 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-white/40 mb-2 ml-1">
+                      Nickname (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      value={nickname}
+                      onChange={(e) => setNickname(e.target.value)}
+                      placeholder="Display Name"
+                      className="w-full px-4 py-3 rounded-xl text-left transition-all duration-300  
+                        bg-black/40 border border-white/10 hover:border-white/20
+                        focus:outline-none focus:border-rose-500/50 focus:ring-4 focus:ring-rose-500/10
+                        text-sm text-white placeholder-white/20 font-medium"
+                    />
                   </div>
                 </div>
 
@@ -390,10 +548,23 @@ export default function Home() {
                 >
                   {isSubmitting ? "Searching..." : (topicInput ? `Find ${topicInput} Partners` : "Surprise Me (Any Topic) →")}
                 </motion.button>
+
+                {/* Group Chat Button */}
+                <motion.button
+                  onClick={handleGroupMatch}
+                  disabled={isSubmitting}
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  className="w-full py-3 rounded-xl font-semibold text-sm bg-purple-500/10 border border-purple-500/20 text-purple-300 hover:bg-purple-500/20 transition-all cursor-pointer"
+                >
+                  👥 Group Chat
+                </motion.button>
               </div>
             </div>
           </motion.div>
         )}
+
+
 
         {phase === "waiting" && (
           <WaitingRoom
@@ -412,8 +583,11 @@ export default function Home() {
           <Chat
             key="chat"
             roomId={roomId}
+            userId={userId || queueId}
             codename={codename}
             partnerCodename={partnerCodename}
+            roomType={roomType}
+            participants={participants}
             onDisconnected={handleDisconnected}
           />
         )}
@@ -422,6 +596,7 @@ export default function Home() {
           <Disconnected
             key="disconnected"
             onReturnHome={handleReturnHome}
+            onFindNew={handleFindNew}
             reason={disconnectReason}
           />
         )}
