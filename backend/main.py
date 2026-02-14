@@ -844,8 +844,8 @@ async def queue_stats():
         if ":p" in k:
             continue
 
-        # SCARD is O(1) — no scanning needed!
-        count = redis.scard(k)
+        # ZCARD is O(1) — no scanning needed!
+        count = redis.zcard(k)
         if count > 0:
             # Extract topic from key: "queue:{topic}:{gender}:{pref}"
             parts = k.split(":")
