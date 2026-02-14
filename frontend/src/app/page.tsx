@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import WaitingRoom from "@/components/WaitingRoom";
 import Chat from "@/components/Chat";
+import GlobalChat from "@/components/GlobalChat";
 import Disconnected from "@/components/Disconnected";
 import Maintenance from "@/components/Maintenance";
 import Link from "next/link";
@@ -564,6 +565,7 @@ export default function Home() {
           />
         )}
       </AnimatePresence>
+      <GlobalChat />
     </main>
   );
 }

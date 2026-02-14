@@ -9,7 +9,7 @@ import uuid
 import time
 from typing import Dict, List, Optional, Set
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from upstash_redis import Redis
@@ -1070,3 +1070,75 @@ async def send_signal(req: SignalRequest):
             redis.expire(f"mailbox:{pid}", MAILBOX_TTL)
 
     return {"status": "ok"}
+
+# ─── Global Chat (Public 50-msg Limit) ───────────────────────────────────────
+
+GLOBAL_CHAT_KEY = "chat:global"
+GLOBAL_CHAT_LIMIT = 50
+
+class GlobalMsg(BaseModel):
+    text: str
+    sender_codename: str
+    sender_color: str = "#3b82f6"  # Blue default
+
+
+@app.post("/chat/global/send")
+async def global_send(msg: GlobalMsg, request: Request, x_forwarded_for: str = Header(None)):
+    # 1. Rate Limiting (IP based)
+    ip = x_forwarded_for or request.client.host
+    rate_key = f"rate:global:{ip}"
+    
+    
+    # Atomic INCR for robust rate limiting
+    # If key doesn't exist, INCR creates it with value 1.
+    count = redis.incr(rate_key)
+    
+    if count == 1:
+        # success, set expiry
+        redis.expire(rate_key, 5) # 5 seconds window
+        
+    if count > 1:
+        # Limit exceeded
+        raise HTTPException(status_code=429, detail="Slow down! 1 msg / 2s.")
+
+    # 2. Add Message
+    payload = json.dumps({
+        "id": str(uuid.uuid4()),
+        "text": msg.text[:200],  # Max 200 chars
+        "sender": msg.sender_codename,
+        "color": msg.sender_color,
+        "timestamp": int(time.time() * 1000)
+    })
+    
+    # Score = Timestamp (MS)
+    # Using MS allows consistent usage with frontend
+    ts_ms = time.time() * 1000
+    redis.zadd(GLOBAL_CHAT_KEY, {payload: ts_ms})
+    
+    # 3. Trim History (Keep last 50)
+    # ZREMRANGEBYRANK key 0 -51 leaves the last 50 items
+    redis.zremrangebyrank(GLOBAL_CHAT_KEY, 0, -(GLOBAL_CHAT_LIMIT + 1))
+    
+    return {"status": "sent"}
+
+
+class GlobalPoll(BaseModel):
+    last_timestamp: float = 0
+
+
+@app.post("/chat/global/poll")
+async def global_poll(req: GlobalPoll):
+    # Fetch messages NEWER than last_timestamp
+    # Use '(' for exclusive range: (last_timestamp
+    
+    min_score = f"({req.last_timestamp}" if req.last_timestamp > 0 else "-inf"
+    messages = redis.zrangebyscore(GLOBAL_CHAT_KEY, min_score, "+inf")
+    
+    parsed_msgs = []
+    for m in messages:
+        try:
+            parsed_msgs.append(json.loads(m))
+        except:
+            pass
+            
+    return {"messages": parsed_msgs}
