@@ -11,6 +11,8 @@ interface WaitingRoomProps {
     interest: string;
     queueId: string;
     codename: string;
+    gender: string;
+    preference: string;
     onMatched: (roomId: string, partnerCodename: string) => void;
     onCancel: () => void;
 }
@@ -19,6 +21,8 @@ export default function WaitingRoom({
     interest,
     queueId,
     codename,
+    gender,
+    preference,
     onMatched,
     onCancel,
 }: WaitingRoomProps) {
@@ -75,6 +79,25 @@ export default function WaitingRoom({
             if (statsRef.current) clearInterval(statsRef.current);
         };
     }, [interest, queueId, onMatched]);
+
+    // Active queue cleanup when user cancels
+    const handleCancel = async () => {
+        try {
+            await fetch(`${getApiUrl()}/queue/leave`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    queue_id: queueId,
+                    interest,
+                    gender,
+                    preference,
+                }),
+            });
+        } catch {
+            // ignore — heartbeat will expire anyway
+        }
+        onCancel();
+    };
 
     // Warn on refresh/close
     useEffect(() => {
@@ -148,7 +171,7 @@ export default function WaitingRoom({
 
             {/* Cancel */}
             <button
-                onClick={onCancel}
+                onClick={handleCancel}
                 className="text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors cursor-pointer underline underline-offset-4 decoration-white/10 hover:decoration-white/30"
             >
                 Leave the queue

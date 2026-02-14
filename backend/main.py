@@ -9,7 +9,7 @@ import uuid
 import time
 from typing import Dict, List, Optional, Set
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from upstash_redis import Redis
@@ -34,16 +34,13 @@ def read_root():
 
 # ─── Redis & State ───────────────────────────────────────────────────────────
 
-# Configuration
-# We check the Environment Variable first (Best Practice).
-# If not found, we use the hardcoded value (Zero-Config for you).
 UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL", "https://exact-tiger-55861.upstash.io")
 UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "Ado1AAIncDI4MTQ3ZDNmNWE2ODY0YjRjYjlmMzE1OGU2ZWZlNzI3MXAyNTU4NjE")
+ADMIN_KEY = os.getenv("ADMIN_KEY", "default-dev-key")
 
-# Initialize Upstash Redis (HTTP based, Vercel safe)
 redis = Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN)
 
-# Common stop words
+# Common stop words for topic normalization
 STOP_WORDS: Set[str] = {
     "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
     "of", "with", "by", "is", "it", "as", "be", "this", "that", "i",
@@ -52,70 +49,145 @@ STOP_WORDS: Set[str] = {
     "does", "doing", "would", "could", "should", "have", "has", "had",
 }
 
+# Queue entry TTL (30 seconds — must be refreshed by check-match heartbeat)
+QUEUE_TTL = 30
+# Room TTL (1 hour)
+ROOM_TTL = 3600
+# Match notification TTL (5 minutes)
+MATCH_TTL = 300
+# Mailbox TTL (5 minutes)
+MAILBOX_TTL = 300
+
 
 def _codename() -> str:
     return f"Subject #{random.randint(100, 999)}"
 
 
-# ─── Redis Helpers ───────────────────────────────────────────────────────────
+# ─── Topic Normalization ────────────────────────────────────────────────────
 
-def add_to_queue(topic: str, user_data: dict):
-    # Store user data as JSON in a list
-    redis.rpush(f"queue:{topic}", json.dumps(user_data))
-    # Set initial heartbeat for queue entry (30s TTL)
-    redis.setex(f"user:{user_data['id']}:heartbeat", 30, "1")
+def normalize_topic(raw: str) -> str:
+    """Normalize topic by lowercasing, stripping stop words.
+    'I want to talk about Football' → 'football'
+    """
+    words = raw.lower().split()
+    filtered = [w for w in words if w not in STOP_WORDS]
+    return " ".join(filtered).strip() if filtered else " ".join(words).strip()
+
+
+# ─── Redis Helpers (Set-Based Queue) ─────────────────────────────────────────
+
+# KEY DESIGN:
+#   queue:{topic}:{gender}:{preference}  → Redis SET of user IDs
+#   user:{id}:data                       → JSON blob with user info (TTL = QUEUE_TTL)
+#   user:{id}:heartbeat                  → "1" (TTL = QUEUE_TTL)
+#
+# Example: A male user looking for females in topic "football":
+#   SADD queue:football:male:female  <user_id>
+#
+# To find a match for them, we check:
+#   queue:football:female:male   (females looking for males)
+#   queue:football:female:any    (females open to any)
+# And if the user's preference is "any":
+#   queue:football:male:any, queue:football:female:any, queue:football:other:any, etc.
+
+
+def _queue_key(topic: str, gender: str, preference: str) -> str:
+    """Build the Redis Set key for a specific queue bucket."""
+    return f"queue:{topic}:{gender}:{preference}"
+
+
+def add_to_queue(topic: str, user_id: str, user_data: dict, gender: str, preference: str):
+    """Add a user to the appropriate queue Set."""
+    key = _queue_key(topic, gender, preference)
+    # Add to the Set
+    redis.sadd(key, user_id)
+    redis.expire(key, ROOM_TTL)  # Keep the set alive for a while
+    # Store user data separately with TTL
+    redis.setex(f"user:{user_id}:data", QUEUE_TTL, json.dumps(user_data))
+    # Set heartbeat
+    redis.setex(f"user:{user_id}:heartbeat", QUEUE_TTL, "1")
+
+
+def remove_from_queue(topic: str, user_id: str, gender: str, preference: str):
+    """Remove a user from their queue Set."""
+    key = _queue_key(topic, gender, preference)
+    redis.srem(key, user_id)
+    redis.delete(f"user:{user_id}:data")
+    redis.delete(f"user:{user_id}:heartbeat")
+
 
 def find_match_in_queue(topic: str, my_gender: str, my_pref: str) -> Optional[dict]:
-    # Check length
-    key = f"queue:{topic}"
-    length = redis.llen(key)
-    if length == 0:
-        return None
+    """Find a compatible match using Set-based O(1) lookups.
+
+    A male looking for female checks:
+      queue:{topic}:female:male   — females specifically looking for males
+      queue:{topic}:female:any    — females open to anyone
     
-    # Iterate through potential matches
-    # We check up to 10 candidates to find a valid, alive one
-    for _ in range(min(length, 10)):
-        data_str = redis.lpop(key)
-        if not data_str:
-            break
-            
-        partner = json.loads(data_str)
-        
-        # Check Heartbeat (Is user still waiting?)
-        if not redis.exists(f"user:{partner['id']}:heartbeat"):
-            # Zombie! Discard and continue loop (effectively cleaning queue)
-            continue
-            
-        # Check compatibility
-        partner_gender = partner["gender"]
-        partner_pref = partner["preference"]
+    A user looking for "any" checks all genders:
+      queue:{topic}:male:any, queue:{topic}:female:any, queue:{topic}:other:any
+      queue:{topic}:male:{my_gender}, queue:{topic}:female:{my_gender}, etc.
+    """
+    all_genders = ["male", "female", "other"]
 
-        match_me = (partner_pref == "any") or (partner_pref == my_gender)
-        match_them = (my_pref == "any") or (my_pref == partner_gender)
+    # Build list of compatible queue keys to check
+    keys_to_check = []
 
-        if match_me and match_them:
+    if my_pref == "any":
+        # I accept anyone → check all genders who want me OR want anyone
+        for g in all_genders:
+            keys_to_check.append(_queue_key(topic, g, my_gender))  # they specifically want my gender
+            keys_to_check.append(_queue_key(topic, g, "any"))       # they want anyone
+    else:
+        # I want a specific gender → check that gender who wants me OR wants anyone
+        keys_to_check.append(_queue_key(topic, my_pref, my_gender))  # they want my gender
+        keys_to_check.append(_queue_key(topic, my_pref, "any"))       # they want anyone
+
+    # De-duplicate keys
+    keys_to_check = list(dict.fromkeys(keys_to_check))
+
+    for key in keys_to_check:
+        # Try up to 5 candidates per key (in case some are zombies)
+        for _ in range(5):
+            user_id = redis.spop(key)
+            if not user_id:
+                break  # Empty set, move to next key
+
+            # Check heartbeat — is this user still alive?
+            if not redis.exists(f"user:{user_id}:heartbeat"):
+                # Zombie! Clean up their data and continue
+                redis.delete(f"user:{user_id}:data")
+                continue
+
+            # Get user data
+            data_str = redis.get(f"user:{user_id}:data")
+            if not data_str:
+                # Data expired but heartbeat somehow alive — skip
+                continue
+
+            partner = json.loads(data_str)
+            # Clean up their queue data (they're matched now)
+            redis.delete(f"user:{user_id}:data")
+            redis.delete(f"user:{user_id}:heartbeat")
             return partner
-        else:
-            # Not a match, push back and keep their heartbeat alive for a moment 
-            # (or let them refresh it via check-match)
-            redis.rpush(key, data_str)
-            
+
     return None
 
+
 def create_room(room_id: str, topic: str, user1: dict, user2: dict):
-    # Store room metadata
-    redis.set(f"room:{room_id}", json.dumps({
+    """Create a room atomically using pipeline."""
+    room_data = json.dumps({
         "topic": topic,
         "users": [user1, user2],
         "active": True
-    }))
-    # Set expire for safety (1 hour)
-    redis.expire(f"room:{room_id}", 3600)
+    })
 
-    # Notify users (Poller will check this)
-    # "match:{user_queue_id}" -> "room_id"
-    redis.setex(f"match:{user1['id']}", 300, room_id)
-    redis.setex(f"match:{user2['id']}", 300, room_id)
+    # Pipeline ensures all operations go in one round-trip
+    pipe = redis.pipeline()
+    pipe.set(f"room:{room_id}", room_data)
+    pipe.expire(f"room:{room_id}", ROOM_TTL)
+    pipe.setex(f"match:{user1['id']}", MATCH_TTL, room_id)
+    pipe.setex(f"match:{user2['id']}", MATCH_TTL, room_id)
+    pipe.exec()
 
 
 # ─── REST Endpoints ──────────────────────────────────────────────────────────
@@ -142,23 +214,23 @@ async def match(req: MatchRequest):
     if not raw_topic:
         return MatchResponse(status="error")
 
-    topic = " ".join(raw_topic.lower().split())
+    topic = normalize_topic(raw_topic)
     gender = req.gender.lower()
     pref = req.preference.lower()
-    
+
     my_id = str(uuid.uuid4())
     my_codename = _codename()
 
-    # Try to find match
+    # Try to find a compatible match
     partner = find_match_in_queue(topic, gender, pref)
-    
+
     if partner:
         # Match found!
         room_id = str(uuid.uuid4())
-        
-        create_room(room_id, topic, 
-                   {"id": my_id, "codename": my_codename}, 
-                   partner)
+
+        create_room(room_id, topic,
+                     {"id": my_id, "codename": my_codename},
+                     partner)
 
         return MatchResponse(
             status="matched",
@@ -168,15 +240,16 @@ async def match(req: MatchRequest):
             matched_topic=topic,
         )
     else:
-        # No match, list myself
-        add_to_queue(topic, {
+        # No match — add myself to the queue
+        user_data = {
             "id": my_id,
             "codename": my_codename,
             "gender": gender,
             "preference": pref,
-            "topic": topic
-        })
-        
+            "topic": topic,
+        }
+        add_to_queue(topic, my_id, user_data, gender, pref)
+
         return MatchResponse(
             status="waiting",
             codename=my_codename,
@@ -200,15 +273,15 @@ class CheckMatchResponse(BaseModel):
 async def check_match(req: CheckMatchRequest):
     # Check if I have been matched
     room_id = redis.get(f"match:{req.queue_id}")
-    
+
     if room_id:
         room_data_str = redis.get(f"room:{room_id}")
         if not room_data_str:
-             return CheckMatchResponse(status="expired")
-        
+            return CheckMatchResponse(status="expired")
+
         room_data = json.loads(room_data_str)
         users = room_data["users"]
-        
+
         # Identify me vs partner
         if users[0]["id"] == req.queue_id:
             my_user = users[0]
@@ -223,202 +296,230 @@ async def check_match(req: CheckMatchRequest):
             codename=my_user["codename"],
             partner_codename=partner_user["codename"],
         )
-    
-    # Refresh my heart beat in queue
-    # Only if not matched yet
-    redis.expire(f"user:{req.queue_id}:heartbeat", 30)
-    
+
+    # Refresh heartbeat + user data TTL (they're still alive and waiting)
+    redis.expire(f"user:{req.queue_id}:heartbeat", QUEUE_TTL)
+    redis.expire(f"user:{req.queue_id}:data", QUEUE_TTL)
+
     return CheckMatchResponse(status="waiting")
 
+
+# ─── Queue Leave (active cleanup when user cancels) ─────────────────────────
+
+class QueueLeaveRequest(BaseModel):
+    queue_id: str
+    interest: str
+    gender: str = "any"
+    preference: str = "any"
+
+
+@app.post("/queue/leave")
+async def leave_queue(req: QueueLeaveRequest):
+    """Actively remove a user from the queue when they cancel."""
+    topic = normalize_topic(req.interest)
+    remove_from_queue(topic, req.queue_id, req.gender.lower(), req.preference.lower())
+    return {"status": "removed"}
+
+
+# ─── Queue Stats (efficient Set-based) ──────────────────────────────────────
 
 @app.get("/queue-stats")
 async def queue_stats():
     keys = redis.keys("queue:*")
     waiting_count = 0
-    top_topics = []
-    
+    topic_counts: Dict[str, int] = {}
+
     for k in keys:
-        # Count ONLY entries with valid heartbeats (actually alive users)
-        length = redis.llen(k)
-        alive_count = 0
-        # Peek at all entries without removing them (lrange)
-        entries = redis.lrange(k, 0, -1)
-        for entry_str in entries:
-            try:
-                entry = json.loads(entry_str)
-                if redis.exists(f"user:{entry['id']}:heartbeat"):
-                    alive_count += 1
-            except Exception:
-                pass
-        
-        waiting_count += alive_count
-        topic_name = k.replace("queue:", "").title()
-        if alive_count > 0:
-            top_topics.append({"topic": topic_name, "count": alive_count})
-            
-    top_topics.sort(key=lambda x: x["count"], reverse=True)
-    
-    # Count rooms that have active participants (at least 1 person polling)
+        # Skip non-Set keys (e.g., room participant sets)
+        if ":p" in k:
+            continue
+
+        # SCARD is O(1) — no scanning needed!
+        count = redis.scard(k)
+        if count > 0:
+            # Extract topic from key: "queue:{topic}:{gender}:{pref}"
+            parts = k.split(":")
+            if len(parts) >= 4:
+                topic_name = ":".join(parts[1:-2]).title()  # Handle topics with colons
+                topic_counts[topic_name] = topic_counts.get(topic_name, 0) + count
+            waiting_count += count
+
+    top_topics = [
+        {"topic": t, "count": c}
+        for t, c in sorted(topic_counts.items(), key=lambda x: x[1], reverse=True)
+    ]
+
+    # Count active chat rooms
     participant_keys = redis.keys("room:*:p")
     active_rooms = 0
     for pk in participant_keys:
         member_count = redis.scard(pk)
         if member_count > 0:
             active_rooms += 1
-    
+
     return {
         "total_online": waiting_count + (active_rooms * 2),
         "waiting_count": waiting_count,
         "active_chat_users": active_rooms * 2,
-        "top_topics": top_topics[:10]
+        "top_topics": top_topics[:10],
     }
 
 
+# ─── Admin (Protected) ──────────────────────────────────────────────────────
+
 @app.post("/admin/flush")
-async def flush_all():
-    """Flush ALL stale data from Redis. Use this to reset the system."""
-    # Delete all queues
+async def flush_all(x_admin_key: str = Header(None)):
+    """Flush ALL data from Redis. Protected by ADMIN_KEY."""
+    if x_admin_key != ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden: invalid admin key")
+
     queue_keys = redis.keys("queue:*")
     for k in queue_keys:
         redis.delete(k)
-    
-    # Delete all rooms
+
     room_keys = redis.keys("room:*")
     for k in room_keys:
         redis.delete(k)
-    
-    # Delete all mailboxes
+
     mailbox_keys = redis.keys("mailbox:*")
     for k in mailbox_keys:
         redis.delete(k)
-    
-    # Delete all match notifications
+
     match_keys = redis.keys("match:*")
     for k in match_keys:
         redis.delete(k)
-    
-    # Delete all heartbeats
-    hb_keys = redis.keys("user:*")
-    for k in hb_keys:
+
+    user_keys = redis.keys("user:*")
+    for k in user_keys:
         redis.delete(k)
-    
+
     return {"status": "flushed", "deleted": {
         "queues": len(queue_keys),
         "rooms": len(room_keys),
         "mailboxes": len(mailbox_keys),
         "matches": len(match_keys),
-        "heartbeats": len(hb_keys),
+        "users": len(user_keys),
     }}
 
 
-# ─── WebSocket Chat with "Mailbox" ──────────────────────────────────────────
-
-# ─── HTTP Chat (Polling) ─────────────────────────────────────────────────────
+# ─── HTTP Chat (Polling with Short-Hold) ─────────────────────────────────────
 
 class ChatMessage(BaseModel):
     room_id: str
     user_id: str
     text: str
 
+
 @app.post("/chat/send")
 async def send_message(msg: ChatMessage):
-    # Broadcast to others
     participants = redis.smembers(f"room:{msg.room_id}:p")
-    
-    # Message payload
+
     payload = json.dumps({
         "type": "chat",
         "text": msg.text,
         "sender": "partner",
-        "timestamp": int(time.time() * 1000)
+        "timestamp": int(time.time() * 1000),
     })
-    
+
     for pid in participants:
         if pid != msg.user_id:
-            # Push to their mailbox
             redis.rpush(f"mailbox:{pid}", payload)
-            redis.expire(f"mailbox:{pid}", 300)
-            
+            redis.expire(f"mailbox:{pid}", MAILBOX_TTL)
+
     return {"status": "sent"}
+
 
 class PollRequest(BaseModel):
     room_id: str
     user_id: str
 
+
 @app.post("/chat/poll")
 async def poll_messages(req: PollRequest):
-    # 1. Register presence (heartbeat)
+    # 1. Register presence (heartbeat for room)
     redis.sadd(f"room:{req.room_id}:p", req.user_id)
-    redis.expire(f"room:{req.room_id}:p", 3600)
-    
-    # 2. Check mailbox
-    # Fetch all messages at once to reduce calls
-    messages = []
-    while True:
+    redis.expire(f"room:{req.room_id}:p", ROOM_TTL)
+
+    # 2. Short-hold polling: wait up to 3 seconds for a message
+    #    Check every 500ms — reduces Redis hits by ~3x while keeping latency low
+    for _ in range(6):
         msg = redis.lpop(f"mailbox:{req.user_id}")
-        if not msg:
-            break
-        messages.append(json.loads(msg))
-        
-    return {"messages": messages} # Empty list if nothing
+        if msg:
+            # Found a message! Drain remaining messages too
+            messages = [json.loads(msg)]
+            while True:
+                m = redis.lpop(f"mailbox:{req.user_id}")
+                if not m:
+                    break
+                messages.append(json.loads(m))
+            return {"messages": messages}
+        await asyncio.sleep(0.5)
+
+    # 3. Nothing after 3 seconds — return empty
+    return {"messages": []}
+
 
 class LeaveRequest(BaseModel):
     room_id: str
     user_id: str
+
 
 @app.post("/chat/leave")
 async def leave_chat(req: LeaveRequest):
     # Remove myself
     redis.srem(f"room:{req.room_id}:p", req.user_id)
     redis.delete(f"mailbox:{req.user_id}")
-    
+
     # Notify others
     participants = redis.smembers(f"room:{req.room_id}:p")
     disconnect_msg = json.dumps({"type": "partner_disconnected"})
-    
+
     for pid in participants:
         redis.rpush(f"mailbox:{pid}", disconnect_msg)
-        
-    # If room empty, delete room
+
+    # If room empty, clean up
     if redis.scard(f"room:{req.room_id}:p") == 0:
         redis.delete(f"room:{req.room_id}")
         redis.delete(f"room:{req.room_id}:p")
-        
+
     return {"status": "left"}
+
 
 # Typing indicator
 @app.post("/chat/typing")
-async def send_typing(req: PollRequest): # Reuse PollRequest since it has room_id & user_id
+async def send_typing(req: PollRequest):
     participants = redis.smembers(f"room:{req.room_id}:p")
     payload = json.dumps({"type": "typing"})
-    
+
     for pid in participants:
         if pid != req.user_id:
             redis.rpush(f"mailbox:{pid}", payload)
-            redis.expire(f"mailbox:{pid}", 300)
-            
+            redis.expire(f"mailbox:{pid}", MAILBOX_TTL)
+
     return {"status": "ok"}
-    
+
+
 # Reveal logic (generic signal)
 class SignalRequest(BaseModel):
     room_id: str
     user_id: str
-    type: str # "reveal_request", "reveal_accept", "reveal_data"
+    type: str  # "reveal_request", "reveal_accept", "reveal_data"
     payload: Optional[dict] = None
+
 
 @app.post("/chat/signal")
 async def send_signal(req: SignalRequest):
     participants = redis.smembers(f"room:{req.room_id}:p")
-    
+
     data = {"type": req.type}
     if req.payload:
-        data["fields"] = req.payload # flatten for frontend compat
-        
+        data["fields"] = req.payload
+
     msg_str = json.dumps(data)
-    
+
     for pid in participants:
         if pid != req.user_id:
             redis.rpush(f"mailbox:{pid}", msg_str)
-            redis.expire(f"mailbox:{pid}", 300)
-            
+            redis.expire(f"mailbox:{pid}", MAILBOX_TTL)
+
     return {"status": "ok"}

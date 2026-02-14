@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import WaitingRoom from "@/components/WaitingRoom";
 import Chat from "@/components/Chat";
 import Disconnected from "@/components/Disconnected";
+import Maintenance from "@/components/Maintenance";
 
 const getApiUrl = () => {
   return "https://thedtudating-xqwf.vercel.app";
@@ -43,21 +44,31 @@ export default function Home() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [disconnectReason, setDisconnectReason] = useState<"partner_left" | "error" | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [serverDown, setServerDown] = useState(false);
+  const failCountRef = useRef(0);
 
-  // Poll for stats
+  // Poll for stats + server health check
   useEffect(() => {
     const fetchStats = async () => {
       try {
         const res = await fetch(`${getApiUrl()}/queue-stats`);
+        if (!res.ok) throw new Error("Server error");
         const data = await res.json();
         setStats(data);
+        failCountRef.current = 0;
+        setServerDown(false);
       } catch (err) {
         console.error("Failed to fetch stats", err);
+        failCountRef.current += 1;
+        // Mark server as down after 3 consecutive failures
+        if (failCountRef.current >= 3) {
+          setServerDown(true);
+        }
       }
     };
 
     fetchStats();
-    const interval = setInterval(fetchStats, 5000);
+    const interval = setInterval(fetchStats, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -136,6 +147,10 @@ export default function Home() {
 
   return (
     <main className="min-h-dvh flex flex-col items-center justify-center p-4 relative overflow-hidden bg-[#0a0a0a]">
+      {/* Server Down Overlay */}
+      <AnimatePresence>
+        {serverDown && <Maintenance />}
+      </AnimatePresence>
       {/* Dynamic Background */}
       <div className="absolute inset-0 pointer-events-none">
         <div className="absolute top-[-20%] left-[-10%] w-[60%] h-[60%] rounded-full bg-rose-900/10 blur-[120px]" />
@@ -386,6 +401,8 @@ export default function Home() {
             interest={topicInput}
             queueId={queueId}
             codename={codename}
+            gender={myGender}
+            preference={preference}
             onMatched={handleMatched}
             onCancel={handleReturnHome}
           />
