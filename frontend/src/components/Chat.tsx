@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import RevealCard from "./RevealCard";
 import { API_URL } from "@/lib/config";
+import { getSocket } from "@/lib/socket";
 
 // ─── Emoji Reactions ───────────────────────────────────────────────────────
 const QUICK_REACTIONS = [
@@ -84,114 +85,99 @@ export default function Chat({
         return () => document.removeEventListener("mousedown", handleClickOutside);
     }, []);
 
-    // HTTP Long Polling Logic
+    // Stable ref for onDisconnected to avoid useEffect re-runs when parent re-renders
+    const onDisconnectedRef = useRef(onDisconnected);
     useEffect(() => {
-        let active = true;
-        let timeoutId: NodeJS.Timeout;
+        onDisconnectedRef.current = onDisconnected;
+    }, [onDisconnected]);
 
-        const poll = async () => {
-            if (!active) return;
-            try {
-                const res = await fetch(`${API_URL}/chat/poll`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ room_id: roomId, user_id: userId }),
-                });
+    // ─── Socket.io Real-Time Connection ────────────────────────────────
+    useEffect(() => {
+        const socket = getSocket();
 
-                if (res.ok) {
-                    const data = await res.json();
-                    const newMessages = data.messages || [];
+        // Join the chat room
+        socket.emit("join_room", { room_id: roomId, user_id: userId });
 
-                    if (newMessages.length > 0) {
-                        newMessages.forEach((msg: any) => {
-                            console.log("[Blind Connection] 📨 Poll Message:", msg);
-                            if (msg.type === "chat") {
-                                setMessages((prev) => [
-                                    ...prev,
-                                    {
-                                        id: Math.random().toString(36).substring(2, 15),
-                                        sender: "partner",
-                                        senderCodename: msg.sender_codename || partnerCodename,
-                                        text: msg.text,
-                                        timestamp: msg.timestamp || Date.now(),
-                                        reactions: [],
-                                    },
-                                ]);
-                                setPartnerTyping(false);
-                            } else if (msg.type === "typing") {
-                                setPartnerTyping(true);
-                                if (partnerTypingTimeoutRef.current)
-                                    clearTimeout(partnerTypingTimeoutRef.current);
-                                partnerTypingTimeoutRef.current = setTimeout(
-                                    () => setPartnerTyping(false),
-                                    2000
-                                );
-                            } else if (msg.type === "reaction") {
-                                // Received a reaction from partner
-                                const { message_id, emoji } = msg;
-                                setMessages((prev) =>
-                                    prev.map((m) =>
-                                        m.id === message_id
-                                            ? { ...m, reactions: [...m.reactions, { emoji, fromMe: false }] }
-                                            : m
-                                    )
-                                );
-                                // Floating reaction animation
-                                spawnFloatingReaction(emoji);
-                            } else if (msg.type === "reveal_request") {
-                                setRevealState((prev) => prev === "i_requested" ? "mutual" : "partner_requested");
-                            } else if (msg.type === "reveal_accept") {
-                                setRevealState("mutual");
-                            } else if (msg.type === "reveal_data") {
-                                setPartnerRevealData(msg.fields);
-                            } else if (msg.type === "partner_disconnected") {
-                                console.log("[Blind Connection] ⚠️ Partner disconnected");
-                                active = false;
-                                onDisconnected("partner_left");
-                            } else if (msg.type === "user_joined") {
-                                setParticipantList(prev => [...prev, msg.codename]);
-                                setMessages(prev => [...prev, {
-                                    id: Math.random().toString(36).substring(2, 15),
-                                    sender: "system",
-                                    text: `${msg.codename} joined the chat`,
-                                    timestamp: Date.now(),
-                                    reactions: [],
-                                }]);
-                            } else if (msg.type === "user_left") {
-                                setParticipantList(prev => prev.filter(p => p !== msg.codename));
-                                setMessages(prev => [...prev, {
-                                    id: Math.random().toString(36).substring(2, 15),
-                                    sender: "system",
-                                    text: `${msg.codename} left the chat`,
-                                    timestamp: Date.now(),
-                                    reactions: [],
-                                }]);
-                            }
-                        });
-                    }
-                }
-            } catch (err) {
-                console.error("Poll error:", err);
-                if (active) timeoutId = setTimeout(poll, 2000);
-                return;
+        // Listen for all message types
+        const handleMessage = (msg: any) => {
+            console.log("[Blind Connection] 📨 Socket Message:", msg);
+
+            if (msg.type === "chat") {
+                setMessages((prev) => [
+                    ...prev,
+                    {
+                        id: Math.random().toString(36).substring(2, 15),
+                        sender: "partner",
+                        senderCodename: msg.sender_codename || partnerCodename,
+                        text: msg.text,
+                        timestamp: msg.timestamp || Date.now(),
+                        reactions: [],
+                    },
+                ]);
+                setPartnerTyping(false);
+            } else if (msg.type === "typing") {
+                setPartnerTyping(true);
+                if (partnerTypingTimeoutRef.current)
+                    clearTimeout(partnerTypingTimeoutRef.current);
+                partnerTypingTimeoutRef.current = setTimeout(
+                    () => setPartnerTyping(false),
+                    2000
+                );
+            } else if (msg.type === "reaction") {
+                const { message_id, emoji } = msg;
+                setMessages((prev) =>
+                    prev.map((m) =>
+                        m.id === message_id
+                            ? { ...m, reactions: [...m.reactions, { emoji, fromMe: false }] }
+                            : m
+                    )
+                );
+                spawnFloatingReaction(emoji);
+            } else if (msg.type === "reveal_request") {
+                setRevealState((prev) => prev === "i_requested" ? "mutual" : "partner_requested");
+            } else if (msg.type === "reveal_accept") {
+                setRevealState("mutual");
+            } else if (msg.type === "reveal_data") {
+                setPartnerRevealData(msg.fields);
+            } else if (msg.type === "partner_disconnected") {
+                console.log("[Blind Connection] ⚠️ Partner disconnected");
+                onDisconnectedRef.current("partner_left");
+            } else if (msg.type === "user_joined") {
+                setParticipantList(prev => [...prev, msg.codename]);
+                setMessages(prev => [...prev, {
+                    id: Math.random().toString(36).substring(2, 15),
+                    sender: "system",
+                    text: `${msg.codename} joined the chat`,
+                    timestamp: Date.now(),
+                    reactions: [],
+                }]);
+            } else if (msg.type === "user_left") {
+                setParticipantList(prev => prev.filter(p => p !== msg.codename));
+                setMessages(prev => [...prev, {
+                    id: Math.random().toString(36).substring(2, 15),
+                    sender: "system",
+                    text: `${msg.codename} left the chat`,
+                    timestamp: Date.now(),
+                    reactions: [],
+                }]);
             }
-
-            if (active) timeoutId = setTimeout(poll, 100);
         };
 
-        poll();
+        socket.on("new_message", handleMessage);
 
+        // Browser close / navigate away: emit leave_room so backend cleans up Redis
+        const handleBeforeUnload = () => {
+            socket.emit("leave_room", { room_id: roomId, user_id: userId });
+        };
+        window.addEventListener("beforeunload", handleBeforeUnload);
+
+        // Cleanup: only remove the listener — do NOT leave the room here.
+        // Room leaving is handled by beforeunload (browser close) or socket disconnect.
         return () => {
-            active = false;
-            if (timeoutId) clearTimeout(timeoutId);
-            fetch(`${API_URL}/chat/leave`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ room_id: roomId, user_id: userId }),
-                keepalive: true
-            });
+            socket.off("new_message", handleMessage);
+            window.removeEventListener("beforeunload", handleBeforeUnload);
         };
-    }, [roomId, userId, onDisconnected]);
+    }, [roomId, userId]);
 
     const generateId = () => Math.random().toString(36).substring(2, 15);
 
@@ -222,11 +208,8 @@ export default function Chat({
         ]);
 
         try {
-            await fetch(`${API_URL}/chat/send`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ room_id: roomId, user_id: userId, text }),
-            });
+            const socket = getSocket();
+            socket.emit("send_message", { room_id: roomId, user_id: userId, text });
         } catch (err) {
             console.error("Send error:", err);
         }
@@ -253,15 +236,12 @@ export default function Chat({
 
         // Send to partner via signal
         try {
-            await fetch(`${API_URL}/chat/signal`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    room_id: roomId,
-                    user_id: userId,
-                    type: "reaction",
-                    payload: { message_id: messageId, emoji },
-                }),
+            const socket = getSocket();
+            socket.emit("signal", {
+                room_id: roomId,
+                user_id: userId,
+                type: "reaction",
+                payload: { message_id: messageId, emoji },
             });
         } catch (err) {
             console.error("Reaction send error:", err);
@@ -284,11 +264,8 @@ export default function Chat({
         ]);
 
         try {
-            await fetch(`${API_URL}/chat/send`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ room_id: roomId, user_id: userId, text: emoji }),
-            });
+            const socket = getSocket();
+            socket.emit("send_message", { room_id: roomId, user_id: userId, text: emoji });
         } catch (err) {
             console.error("Emoji send error:", err);
         }
@@ -298,11 +275,8 @@ export default function Chat({
         setInput(e.target.value);
 
         if (!typingTimeoutRef.current) {
-            fetch(`${API_URL}/chat/typing`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ room_id: roomId, user_id: userId }),
-            });
+            const socket = getSocket();
+            socket.emit("typing", { room_id: roomId, user_id: userId });
             typingTimeoutRef.current = setTimeout(() => {
                 typingTimeoutRef.current = null;
             }, 2000);
@@ -316,30 +290,20 @@ export default function Chat({
         }
     };
 
-    const handleRevealRequest = async () => {
+    const handleRevealRequest = () => {
+        const socket = getSocket();
         if (revealState === "idle") {
             setRevealState("i_requested");
-            await fetch(`${API_URL}/chat/signal`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ room_id: roomId, user_id: userId, type: "reveal_request" }),
-            });
+            socket.emit("signal", { room_id: roomId, user_id: userId, type: "reveal_request" });
         } else if (revealState === "partner_requested") {
             setRevealState("mutual");
-            await fetch(`${API_URL}/chat/signal`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ room_id: roomId, user_id: userId, type: "reveal_accept" }),
-            });
+            socket.emit("signal", { room_id: roomId, user_id: userId, type: "reveal_accept" });
         }
     };
 
-    const handleSendRevealData = async (fields: Record<string, string>) => {
-        await fetch(`${API_URL}/chat/signal`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ room_id: roomId, user_id: userId, type: "reveal_data", payload: fields }),
-        });
+    const handleSendRevealData = (fields: Record<string, string>) => {
+        const socket = getSocket();
+        socket.emit("signal", { room_id: roomId, user_id: userId, type: "reveal_data", payload: fields });
     };
 
     const formatTime = (ts: number) => {

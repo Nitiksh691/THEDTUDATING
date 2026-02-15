@@ -12,13 +12,8 @@ import { API_URL } from "@/lib/config";
 
 const SUGGESTIONS = [
   { label: "Deep Talk", emoji: "🧠" },
-  { label: "Anime", emoji: "⛩️" },
-  { label: "Gaming", emoji: "🎮" },
-  { label: "Movies", emoji: "🎬" },
-  { label: "Music", emoji: "🎵" },
   { label: "Relationship Advice", emoji: "💔" },
   { label: "Study Partner", emoji: "📚" },
-  { label: "Vent", emoji: "🗣️" },
 ];
 
 type AppPhase = "hero" | "matching" | "waiting" | "chat" | "disconnected";
