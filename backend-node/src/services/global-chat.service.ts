@@ -78,3 +78,10 @@ export async function globalPoll(
 
     return messages;
 }
+
+/**
+ * Clear all global chat messages.
+ */
+export async function clearGlobalChat(): Promise<void> {
+    await redis.del(GLOBAL_CHAT_KEY);
+}

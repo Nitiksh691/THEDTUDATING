@@ -695,7 +695,7 @@ export default function Home() {
               />
             )}
           </AnimatePresence>
-          <GlobalChat />
+          {phase !== "chat" && <GlobalChat />}
         </main>
       )}
     </div>
