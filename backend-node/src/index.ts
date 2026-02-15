@@ -194,7 +194,7 @@ app.use(matchRoutes);
 app.use(queueRoutes);
 app.use(chatRoutes);
 app.use(groupRoutes);
-app.use("/global-chat", globalChatRoutes);
+app.use(globalChatRoutes);
 app.use("/notifications", notificationRoutes);
 app.use("/polls", pollRoutes);
 
