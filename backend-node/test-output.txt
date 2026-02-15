@@ -1,0 +1,60 @@
+﻿
+[1m[46m RUN [49m[22m [36mv4.0.18 [39m[90mC:/Users/nitik/Desktop/DD/backend-node[39m
+
+[90mstdout[2m | tests/api.test.ts
+[22m[39m
+  ΓòöΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòù
+  Γòæ  DD Backend (Node.js) is running! ≡ƒÜÇ     Γòæ
+  Γòæ  Port: 3001                            Γòæ
+  Γòæ  Dashboard: http://localhost:3001       Γòæ
+  ΓòÜΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓò¥
+  
+
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mHealth & Infrastructure[2m > [22mGET /health returns ok with uptime[32m 6[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mHealth & Infrastructure[2m > [22mGET / returns dashboard HTML[32m 4[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mHealth & Infrastructure[2m > [22msets security headers[32m 3[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mMatching Flow[2m > [22mPOST /match ΓÇö first user gets waiting status[33m 888[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mMatching Flow[2m > [22mPOST /check-match ΓÇö user1 still waiting[32m 37[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mMatching Flow[2m > [22mPOST /match ΓÇö second user gets matched[33m 486[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mMatching Flow[2m > [22mPOST /check-match ΓÇö user1 now matched[32m 68[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mMatching Flow[2m > [22mGET /room/:id/info returns room data[32m 37[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mQueue Management[2m > [22mGET /queue-stats returns stats structure[32m 102[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mQueue Management[2m > [22mGET /queue/browse returns people array[32m 35[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mQueue Management[2m > [22mPOST /queue/leave removes user from queue[33m 946[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mChat Flow[2m > [22mPOST /chat/send ΓÇö sends a message[32m 131[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mChat Flow[2m > [22mPOST /chat/poll ΓÇö user2 receives the message[32m 131[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mChat Flow[2m > [22mPOST /chat/typing ΓÇö sends typing indicator[32m 105[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mChat Flow[2m > [22mPOST /chat/poll after typing ΓÇö user2 sees typing[32m 67[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mChat Flow[2m > [22mPOST /chat/signal ΓÇö sends a signal (reaction)[32m 109[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mChat Flow[2m > [22mPOST /chat/leave ΓÇö user leaves and partner is notified[33m 346[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mGroup Chat[2m > [22mPOST /match-group ΓÇö creates a new group[32m 229[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mGroup Chat[2m > [22mPOST /match-group ΓÇö second user joins existing group[33m 361[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mGroup Chat[2m > [22mGET /room/:id/info ΓÇö shows group info[32m 36[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mGroup Chat[2m > [22mPOST /group/close ΓÇö closes the group[32m 132[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mGroup Chat[2m > [22mGET /room/:id/info ΓÇö group is now closed[32m 46[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mGlobal Chat[2m > [22mPOST /chat/global/send ΓÇö sends a global message[32m 132[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mGlobal Chat[2m > [22mPOST /chat/global/poll ΓÇö retrieves global messages[32m 242[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mGlobal Chat[2m > [22mPOST /chat/global/send ΓÇö rate limited on rapid calls[33m 5813[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mAdmin[2m > [22mPOST /admin/flush ΓÇö requires auth header[32m 3[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mAdmin[2m > [22mPOST /admin/flush ΓÇö rejects wrong key[32m 3[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mAdmin[2m > [22mPOST /admin/flush ΓÇö works with correct key[32m 35[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mInput Validation[2m > [22mPOST /check-match ΓÇö missing queue_id returns 400[32m 3[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mInput Validation[2m > [22mPOST /match/direct ΓÇö missing codename returns 400[32m 4[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mInput Validation[2m > [22mPOST /chat/send ΓÇö missing fields returns 400[32m 3[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mInput Validation[2m > [22mPOST /chat/poll ΓÇö missing user_id returns 400[32m 3[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mInput Validation[2m > [22mPOST /chat/signal ΓÇö missing type returns 400[32m 3[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mInput Validation[2m > [22mPOST /chat/global/send ΓÇö missing text returns 400[32m 3[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mInput Validation[2m > [22mPOST /chat/global/send ΓÇö missing sender_codename returns 400[32m 3[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mDirect Match[2m > [22mPOST /match ΓÇö put a user in queue[33m 822[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mDirect Match[2m > [22mPOST /match/direct ΓÇö matches with user by codename[33m 480[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mDirect Match[2m > [22mPOST /match/direct ΓÇö not_found for non-existent codename[32m 35[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mEdge Cases[2m > [22mPOST /match ΓÇö topic normalization works[33m 1356[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mEdge Cases[2m > [22mPOST /match ΓÇö empty interest defaults to random[33m 1308[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mEdge Cases[2m > [22mGET /room/:id/info ΓÇö non-existent room returns not_found[32m 36[2mms[22m[39m
+ [32mΓ£ô[39m tests/api.test.ts[2m > [22mEdge Cases[2m > [22mPOST /check-match ΓÇö non-existent queue_id returns waiting[32m 99[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m42 passed[39m[22m[90m (42)[39m
+[2m   Start at [22m 13:06:54
+[2m   Duration [22m 17.39s[2m (transform 239ms, setup 0ms, import 552ms, tests 16.62s, environment 0ms)[22m
+

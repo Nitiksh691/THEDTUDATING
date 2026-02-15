@@ -1,0 +1,2 @@
+IP=127.0.0.1, Key=rate:global:127.0.0.1, Result=True
+IP=127.0.0.1, Key=rate:global:127.0.0.1, Result=True

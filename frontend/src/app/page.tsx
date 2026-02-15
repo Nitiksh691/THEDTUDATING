@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import WaitingRoom from "@/components/WaitingRoom";
 import Chat from "@/components/Chat";
+import GlobalChat from "@/components/GlobalChat";
 import Disconnected from "@/components/Disconnected";
 import Maintenance from "@/components/Maintenance";
 import Link from "next/link";
@@ -11,13 +12,8 @@ import { API_URL } from "@/lib/config";
 
 const SUGGESTIONS = [
   { label: "Deep Talk", emoji: "🧠" },
-  { label: "Anime", emoji: "⛩️" },
-  { label: "Gaming", emoji: "🎮" },
-  { label: "Movies", emoji: "🎬" },
-  { label: "Music", emoji: "🎵" },
   { label: "Relationship Advice", emoji: "💔" },
   { label: "Study Partner", emoji: "📚" },
-  { label: "Vent", emoji: "🗣️" },
 ];
 
 type AppPhase = "hero" | "matching" | "waiting" | "chat" | "disconnected";
@@ -47,7 +43,25 @@ export default function Home() {
   const [serverDown, setServerDown] = useState(false);
   const [roomType, setRoomType] = useState<"pair" | "group">("pair");
   const [participants, setParticipants] = useState<string[]>([]);
+  /* ─── Notifications & Polls ─── */
+  const [announcements, setAnnouncements] = useState<any[]>([]);
+  const [dismissedAnnouncements, setDismissedAnnouncements] = useState<string[]>([]);
+  const [poll, setPoll] = useState<any>(null);
+  const [votedOption, setVotedOption] = useState<number | null>(null);
+  const [isPollMinimized, setIsPollMinimized] = useState(false);
   const failCountRef = useRef(0);
+
+  // Load dismissed notifications from LocalStorage
+  useEffect(() => {
+    const stored = localStorage.getItem("dismissed_announcements");
+    if (stored) setDismissedAnnouncements(JSON.parse(stored));
+  }, []);
+
+  const dismissAnnouncement = (id: string) => {
+    const updated = [...dismissedAnnouncements, id];
+    setDismissedAnnouncements(updated);
+    localStorage.setItem("dismissed_announcements", JSON.stringify(updated));
+  };
 
   // Poll for stats + server health check
   useEffect(() => {
@@ -74,6 +88,48 @@ export default function Home() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    // Fetch Notifications
+    fetch(`${API_URL}/notifications/active`)
+      .then(res => res.json())
+      .then(data => setAnnouncements(data.announcements || []))
+      .catch(err => console.error("Failed to fetch notifications", err));
+
+    // Fetch Poll
+    fetch(`${API_URL}/polls/active`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.poll) {
+          setPoll(data.poll);
+          if (data.poll.userVoted) setVotedOption(-1); // Mark as voted
+        }
+      })
+      .catch(err => console.error("Failed to fetch poll", err));
+  }, []);
+
+  const handleVote = async (optionIndex: number) => {
+    if (!poll || votedOption !== null) return;
+
+    // Optimistic update
+    const newPoll = { ...poll };
+    newPoll.options[optionIndex].votes++;
+    newPoll.totalVotes++;
+    newPoll.userVoted = true;
+    setPoll(newPoll);
+    setVotedOption(optionIndex);
+    setIsPollMinimized(true); // Auto-hide after voting
+
+    try {
+      await fetch(`${API_URL}/polls/vote`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pollId: poll.id, optionIndex })
+      });
+    } catch (err) {
+      console.error("Vote failed", err);
+    }
+  };
+
   const handleEnter = async (topicToUse?: string) => {
     // Guard against double-submit
     if (isSubmitting) return;
@@ -82,7 +138,7 @@ export default function Home() {
     const topic = (topicToUse || topicInput).trim();
     setTopicInput(topic);
     setErrorMsg("");
-    console.log("[DD Dating] 🔍 Searching for topic:", topic, myGender, preference);
+
     try {
       const res = await fetch(`${API_URL}/match`, {
         method: "POST",
@@ -95,10 +151,10 @@ export default function Home() {
         }),
       });
       const data = await res.json();
-      console.log("[DD Dating] 📡 Server response:", data);
+
 
       if (data.status === "matched") {
-        console.log(`[DD Dating] ✅ Matched! Room: ${data.room_id}, Partner: ${data.partner_codename}`);
+
         setRoomId(data.room_id);
         setUserId(data.user_id);
         setCodename(data.codename);
@@ -108,7 +164,7 @@ export default function Home() {
         setErrorMsg("Please enter a valid topic.");
         setIsSubmitting(false);
       } else {
-        console.log(`[DD Dating] ⏳ Waiting in queue. Codename: ${data.codename}, QueueID: ${data.queue_id}`);
+
         setCodename(data.codename);
         setQueueId(data.queue_id);
         setPhase("waiting");
@@ -200,370 +256,448 @@ export default function Home() {
     }
   };
 
-  return (
-    <main className="min-h-dvh flex flex-col items-center justify-center p-4 relative overflow-hidden bg-[#0a0a0a]">
-      {/* Server Down Overlay */}
-      <AnimatePresence>
-        {serverDown && <Maintenance />}
-      </AnimatePresence>
-      {/* Dynamic Background */}
-      <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute top-[-20%] left-[-10%] w-[60%] h-[60%] rounded-full bg-rose-900/10 blur-[120px]" />
-        <div className="absolute bottom-[-20%] right-[-10%] w-[60%] h-[60%] rounded-full bg-blue-900/10 blur-[120px]" />
-      </div>
+  /* ─── UI Components ─── */
 
-      {/* Top Navigation */}
-      {(phase === "hero" || phase === "matching") && (
-        <>
-          {/* Suggestion Box - Top Left */}
-          <motion.div
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="fixed top-4 left-4 z-50"
-          >
-            <a
-              href="mailto:nitikshpal@gmail.com?subject=Idea for DTU Dating"
-              className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 transition-all backdrop-blur-md group shadow-lg shadow-black/20"
+  const AnnouncementBanner = () => {
+    const visibleAnnouncements = announcements.filter(a => !dismissedAnnouncements.includes(a._id));
+    if (visibleAnnouncements.length === 0) return null;
+
+    return (
+      <div className="fixed top-4 right-4 z-50 w-80 space-y-2 pointer-events-auto">
+        <AnimatePresence>
+          {visibleAnnouncements.map((ann) => (
+            <motion.div
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 50 }}
+              key={ann._id}
+              className={`relative p-3 rounded-xl border shadow-2xl backdrop-blur-md overflow-hidden group
+                ${ann.type === 'warning' ? 'bg-yellow-900/80 border-yellow-500/30 text-yellow-100' :
+                  ann.type === 'success' ? 'bg-green-900/80 border-green-500/30 text-green-100' :
+                    ann.type === 'tech-stack' ? 'bg-purple-900/80 border-purple-500/30 text-purple-100' :
+                      'bg-slate-900/80 border-blue-500/30 text-blue-100'}`}
             >
-              <span className="text-lg">💡</span>
-              <span className="text-xs font-semibold text-white/80 group-hover:text-white hidden sm:inline-block">
-                Have an idea?
-              </span>
-            </a>
-          </motion.div>
-        </>
-      )}
-
-      <AnimatePresence mode="wait">
-        {phase === "hero" && (
-          <motion.div
-            key="hero"
-            initial={{ opacity: 0, scale: 0.95, y: 20 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: -20 }}
-            transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-            className="w-full max-w-lg mx-auto z-10 text-center"
-          >
-            {/* Live User Badge */}
-            <div className="flex justify-center mb-8">
-              <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 backdrop-blur-md shadow-lg">
-                <span className="relative flex h-2.5 w-2.5">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
-                </span>
-                <span className="text-sm font-medium text-white/90 tracking-wide">
-                  {stats ? `${stats.total_online} Students Online` : "Connecting..."}
-                </span>
-              </div>
-            </div>
-
-            <h1 className="text-5xl sm:text-7xl font-black mb-6 tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-white via-white to-white/50 drop-shadow-sm">
-              DTU Dating
-            </h1>
-
-            <p className="text-white/60 text-lg sm:text-xl font-light tracking-wide max-w-sm mx-auto mb-8 leading-relaxed">
-              The anonymous social network for students. Connect, vent, and vibe without judgment.
-            </p>
-
-            <div className="bg-white/5 border border-white/10 rounded-xl p-4 mb-8 max-w-sm mx-auto text-left">
-              <div className="flex items-start gap-3 mb-3">
-                <span className="text-xl">🔒</span>
-                <div>
-                  <h3 className="text-white font-bold text-sm">Privacy First</h3>
-                  <p className="text-white/50 text-xs">We don't store chats, IPs, or personal data. Everything is ephemeral.</p>
-                </div>
-              </div>
               <div className="flex items-start gap-3">
-                <span className="text-xl">⚡</span>
-                <div>
-                  <h3 className="text-white font-bold text-sm">Instant Connections</h3>
-                  <p className="text-white/50 text-xs">Matching based on topics and interests in milliseconds.</p>
+                <span className="text-xl mt-0.5">
+                  {ann.type === 'warning' ? '⚠️' : ann.type === 'success' ? '✅' : ann.type === 'tech-stack' ? '🛠️' : '📢'}
+                </span>
+                <div className="flex-1 pr-4">
+                  <h3 className="font-bold text-sm mb-1">{ann.title}</h3>
+                  <p className="text-xs opacity-90 leading-relaxed font-light">{ann.message}</p>
                 </div>
-              </div>
-            </div>
-
-            <motion.button
-              onClick={() => setPhase("matching")}
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              className="px-8 py-4 rounded-full bg-white text-black font-bold text-lg tracking-wide shadow-[0_0_40px_-10px_rgba(255,255,255,0.3)] hover:shadow-[0_0_60px_-15px_rgba(255,255,255,0.5)] transition-all"
-            >
-              Start Matching →
-            </motion.button>
-
-            {/* Stats */}
-            <div className="mt-6 text-center">
-              <p className="text-[10px] uppercase tracking-widest text-white/40">
-                {stats?.waiting_count ?? "-"} Waiting • {stats?.active_chat_users ?? "-"} Chatting
-              </p>
-            </div>
-
-
-
-            {/* Connect Section */}
-            <div className="mt-8 flex flex-col items-center gap-2">
-              <span className="text-[10px] font-bold uppercase tracking-widest text-white/30">
-                Connect with me
-              </span>
-              <div className="flex gap-3">
-                <a
-                  href="https://www.instagram.com/nitiksh_das?igsh=ZmRhZXcycDJhYXlo&utm_source=qr"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="p-2.5 rounded-xl bg-white/[0.04] border border-white/10 hover:bg-gradient-to-tr hover:from-purple-500/20 hover:to-orange-500/20 hover:border-white/20 transition-all group"
-                  title="Instagram"
+                <button
+                  onClick={() => dismissAnnouncement(ann._id)}
+                  className="absolute top-2 right-2 p-1 rounded-full hover:bg-white/10 opacity-50 hover:opacity-100 transition-all text-xs"
                 >
-                  <svg className="w-4 h-4 text-white/60 group-hover:text-white transition-colors" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z" />
-                  </svg>
-                </a>
-                <a
-                  href="https://www.linkedin.com/in/nitiksh-pal-924275274?utm_source=share_via&utm_content=profile&utm_medium=member_ios"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="p-2.5 rounded-xl bg-white/[0.04] border border-white/10 hover:bg-[#0077b5]/20 hover:border-[#0077b5]/40 transition-all group"
-                  title="LinkedIn"
-                >
-                  <svg className="w-4 h-4 text-white/60 group-hover:text-white transition-colors" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M4.98 3.5c0 1.381-1.11 2.5-2.48 2.5s-2.48-1.119-2.48-2.5c0-1.38 1.11-2.5 2.48-2.5s2.48 1.12 2.48 2.5zm.02 4.5h-5v16h5v-16zm7.982 0h-4.968v16h4.969v-8.399c0-4.67 6.029-5.052 6.029 0v8.399h4.988v-10.131c0-7.88-8.922-7.593-11.018-3.714v-2.155z" />
-                  </svg>
-                </a>
+                  ✕
+                </button>
               </div>
-            </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+    );
+  };
 
-            {/* About Us Link */}
-            <div className="text-center mt-8">
-              <Link
-                href="/about"
-                className="text-white/30 hover:text-white/60 text-xs font-medium tracking-wide transition-colors underline underline-offset-4 decoration-white/10 hover:decoration-white/30"
-              >
-                About this project ✨
-              </Link>
-            </div>
-          </motion.div>
-        )}
+  const PollWidget = () => {
+    if (!poll) return null;
 
-        {phase === "matching" && (
-          <motion.div
-            key="matching"
-            initial={{ opacity: 0, x: 20 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -20 }}
-            transition={{ duration: 0.4 }}
-            className="w-full max-w-lg mx-auto z-10"
+    if (isPollMinimized) {
+      return (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mt-8">
+          <button
+            onClick={() => setIsPollMinimized(false)}
+            className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition-all text-xs font-bold text-white/60 hover:text-white"
           >
-            <div className="flex items-center mb-6">
+            📊 Show Poll
+          </button>
+        </motion.div>
+      );
+    }
+
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="w-full max-w-lg mt-8 p-5 rounded-2xl bg-white/5 border border-white/10 backdrop-blur-sm relative"
+      >
+        <button
+          onClick={() => setIsPollMinimized(true)}
+          className="absolute top-4 right-4 text-white/20 hover:text-white transition-colors text-lg leading-none"
+          title="Minimize Poll"
+        >
+          –
+        </button>
+
+        <div className="flex justify-between items-center mb-3 pr-8">
+          <h3 className="text-sm font-bold text-white/90">📊 Live Poll: {poll.question}</h3>
+        </div>
+
+        <div className="space-y-2">
+          {poll.options.map((opt: any, idx: number) => {
+            const percent = poll.totalVotes ? Math.round((opt.votes / poll.totalVotes) * 100) : 0;
+            const isWinner = Math.max(...poll.options.map((o: any) => o.votes)) === opt.votes && poll.totalVotes > 0;
+
+            return (
               <button
-                onClick={() => setPhase("hero")}
-                className="text-white/40 hover:text-white px-2 py-1 text-sm transition-colors"
+                key={idx}
+                onClick={() => handleVote(idx)}
+                disabled={votedOption !== null}
+                className="relative w-full text-left group"
               >
-                ← Back
-              </button>
-              <div className="flex-1 text-center pr-10">
-                <h2 className="text-xl font-bold text-white">Match Preferences</h2>
-              </div>
-            </div>
-
-            <div className="glass glow-purple p-1 bg-gradient-to-b from-white/10 to-white/5 rounded-2xl border border-white/10 shadow-2xl backdrop-blur-xl">
-              <div className="bg-[#0f0f0f]/90 rounded-xl p-6 sm:p-8 space-y-6">
-
-                {/* Gender Selection */}
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-white/40 mb-2">I am</label>
-                    <div className="flex bg-black/40 rounded-lg p-1 border border-white/10">
-                      {["Male", "Female", "Other"].map((g) => (
-                        <button
-                          key={g}
-                          onClick={() => setMyGender(g.toLowerCase())}
-                          className={`flex-1 py-2 text-xs font-bold rounded-md transition-all ${myGender === g.toLowerCase()
-                            ? "bg-white/20 text-white shadow-sm"
-                            : "text-white/40 hover:text-white/70"
-                            }`}
-                        >
-                          {g}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-white/40 mb-2">Looking for</label>
-                    <div className="flex bg-black/40 rounded-lg p-1 border border-white/10">
-                      {["Male", "Female", "Any"].map((g) => (
-                        <button
-                          key={g}
-                          onClick={() => setPreference(g.toLowerCase())}
-                          className={`flex-1 py-2 text-xs font-bold rounded-md transition-all ${preference === g.toLowerCase()
-                            ? "bg-white/20 text-white shadow-sm"
-                            : "text-white/40 hover:text-white/70"
-                            }`}
-                        >
-                          {g}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Identity Inputs */}
-                <div className="grid grid-cols-1 gap-4">
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-white/40 mb-2 ml-1">
-                      Nickname (Optional)
-                    </label>
-                    <input
-                      type="text"
-                      value={nickname}
-                      onChange={(e) => setNickname(e.target.value)}
-                      placeholder="Display Name"
-                      className="w-full px-4 py-3 rounded-xl text-left transition-all duration-300  
-                        bg-black/40 border border-white/10 hover:border-white/20
-                        focus:outline-none focus:border-rose-500/50 focus:ring-4 focus:ring-rose-500/10
-                        text-sm text-white placeholder-white/20 font-medium"
-                    />
-                  </div>
-                </div>
-
-                {/* Topic Input */}
-                <div className="relative">
-                  <label className="block text-xs font-bold uppercase tracking-wider text-white/40 mb-2 ml-1">
-                    Topic (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={topicInput}
-                    onChange={(e) => {
-                      setTopicInput(e.target.value);
-                      setErrorMsg("");
-                    }}
-                    onKeyDown={handleKeyDown}
-                    placeholder="e.g. Chill, Vent, Movies..."
-                    className="w-full px-5 py-4 rounded-xl text-left transition-all duration-300  
-                        bg-black/40 border border-white/10 hover:border-white/20
-                        focus:outline-none focus:border-rose-500/50 focus:ring-4 focus:ring-rose-500/10
-                        text-base sm:text-lg text-white placeholder-white/20 font-medium"
-                    autoFocus
+                {/* Progress Bar Background */}
+                <div className="absolute inset-0 bg-white/5 rounded-lg overflow-hidden">
+                  <motion.div
+                    initial={{ width: 0 }}
+                    animate={{ width: `${percent}%` }}
+                    transition={{ duration: 0.5, ease: "easeOut" }}
+                    className={`h-full opacity-20 ${isWinner ? 'bg-green-400' : 'bg-white'}`}
                   />
                 </div>
 
-                {/* Trending Topics (Dynamic) */}
-                {stats && stats.top_topics.length > 0 && (
-                  <div className="mb-2">
-                    <div className="flex items-center justify-between mb-2 px-1">
-                      <span className="text-xs font-bold uppercase tracking-wider text-white/30">Trending Now</span>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {stats.top_topics.map((t) => (
-                        <button
-                          key={t.topic}
-                          onClick={() => handleEnter(t.topic)}
-                          className="group relative flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 border border-white/5 hover:bg-white/10 hover:border-white/10 transition-all cursor-pointer"
-                        >
-                          <span className="text-xs text-white/70 font-medium group-hover:text-white">{t.topic}</span>
-                          <span className="text-[10px] font-bold text-rose-300 group-hover:text-rose-200">
-                            {t.count}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                {/* Content */}
+                <div className={`relative px-3 py-2 flex justify-between items-center text-xs font-medium transition-colors
+                    ${votedOption === idx ? 'text-green-300' : 'text-white/70 group-hover:text-white'}
+                `}>
+                  <span>{opt.text} {votedOption === idx && "✓"}</span>
+                  <span>{percent}% ({opt.votes})</span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        <div className="mt-2 text-right text-[10px] text-white/30">
+          Total votes: {poll.totalVotes}
+        </div>
+      </motion.div>
+    );
+  };
 
-                {/* Quick Suggestions (Static) */}
-                <div>
-                  <div className="flex items-center justify-between mb-2 px-1">
-                    <span className="text-xs font-bold uppercase tracking-wider text-white/30">Quick Picks</span>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {SUGGESTIONS.map((s) => (
-                      <button
-                        key={s.label}
-                        onClick={() => handleEnter(s.label)}
-                        className="px-3 py-1.5 rounded-lg bg-white/5 border border-white/5 hover:bg-white/10 hover:border-white/10 transition-all cursor-pointer text-xs text-white/60 hover:text-white"
-                      >
-                        {s.emoji} {s.label}
-                      </button>
-                    ))}
+  return (
+    <div className="min-h-screen bg-[#050505] relative overflow-hidden font-sans selection:bg-rose-500/30">
+
+      {/* ─── Background Effects ─── */}
+      <div className="fixed inset-0 pointer-events-none">
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-purple-900/10 blur-[120px] rounded-full mix-blend-screen animate-pulse-slow" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-rose-900/10 blur-[120px] rounded-full mix-blend-screen animate-pulse-slow delay-1000" />
+        <div className="absolute top-[20%] right-[10%] w-[20%] h-[20%] bg-blue-900/10 blur-[100px] rounded-full mix-blend-screen animate-pulse-slow delay-2000" />
+      </div>
+
+      {/* ─── Spotlight Effect ─── */}
+
+
+      {/* ─── Maintenance Mode ─── */}
+      {serverDown ? (
+        <Maintenance />
+      ) : (
+        <main className="relative z-10 flex min-h-screen flex-col items-center justify-center p-4">
+
+          {/* Notifications Banner */}
+          {phase !== "chat" && <AnnouncementBanner />}
+
+          <AnimatePresence mode="wait">
+            {phase === "hero" && (
+              <motion.div
+                key="hero"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                transition={{ duration: 0.8, ease: "easeOut" }}
+                className="w-full max-w-lg mx-auto text-center"
+              >
+
+                {/* ─── Brand Logo/Title ─── */}
+                <div className="mb-8 relative inline-block group">
+                  <h1 className="relative text-5xl sm:text-7xl font-bold tracking-tight text-white mb-2">
+                    DD Dating
+                  </h1>
+                  <div className="flex items-center justify-center gap-2 text-white/40 text-sm font-medium tracking-widest uppercase">
+                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                    <span>{stats ? stats.total_online : "..."} Online Now</span>
                   </div>
                 </div>
 
-                {/* Error Message */}
-                <AnimatePresence>
-                  {errorMsg && (
-                    <motion.div
-                      initial={{ opacity: 0, height: 0 }}
-                      animate={{ opacity: 1, height: "auto" }}
-                      exit={{ opacity: 0, height: 0 }}
-                      className="text-rose-400 text-xs font-medium pl-1"
+                {/* ─── Main Description ─── */}
+                <p className="text-lg sm:text-xl text-white/60 mb-10 max-w-md mx-auto leading-relaxed font-light">
+                  Experience the thrill of <span className="text-white font-medium">blind conversations</span>.
+                  Connect instantly, reveal gradually. No profiles, just vibes.
+                </p>
+
+                {/* ─── Connect Button ─── */}
+                <button
+                  onClick={() => setPhase("matching")}
+                  className="group relative inline-flex items-center justify-center px-8 py-4 font-bold text-white transition-all duration-200 bg-white/5 font-lg rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-white/20 hover:bg-white/10 border border-white/10 overflow-hidden"
+                >
+                  <div className="absolute inset-0 w-full h-full bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:animate-shimmer" />
+                  <span className="mr-2 text-xl">Start Matching →</span>
+                </button>
+
+                {/* ─── Poll Widget ─── */}
+                <div className="mt-8 flex justify-center">
+                  <PollWidget />
+                </div>
+
+                {/* ─── Social Links ─── */}
+                <div className="mt-12 flex flex-col items-center gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-white/30">
+                    Connect with me
+                  </span>
+                  <div className="flex gap-3">
+                    <a
+                      href="https://www.instagram.com/nitiksh_das?igsh=ZmRhZXcycDJhYXlo&utm_source=qr"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="p-2.5 rounded-xl bg-white/[0.04] border border-white/10 hover:bg-gradient-to-tr hover:from-purple-500/20 hover:to-orange-500/20 hover:border-white/20 transition-all group"
+                      title="Instagram"
                     >
-                      ⚠️ {errorMsg}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
+                      <span className="text-white/60 group-hover:text-white transition-colors">📸</span>
+                    </a>
+                    <a
+                      href="https://www.linkedin.com/in/nitiksh-pal-924275274?utm_source=share_via&utm_content=profile&utm_medium=member_ios"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="p-2.5 rounded-xl bg-white/[0.04] border border-white/10 hover:bg-[#0077b5]/20 hover:border-[#0077b5]/40 transition-all group"
+                      title="LinkedIn"
+                    >
+                      <span className="text-white/60 group-hover:text-white transition-colors">💼</span>
+                    </a>
+                  </div>
+                </div>
 
-                {/* CTA Button */}
-                <motion.button
-                  onClick={() => handleEnter()}
-                  disabled={isSubmitting}
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  className={`w-full py-4 rounded-xl font-bold text-base tracking-wide bg-gradient-to-r from-rose-600 to-orange-600 text-white shadow-rose-900/20 hover:shadow-rose-900/40 hover:brightness-110 transition-all duration-300 cursor-pointer shadow-lg ${isSubmitting ? 'opacity-50 cursor-not-allowed' : ''}`}
-                >
-                  {isSubmitting ? "Searching..." : (topicInput ? `Find ${topicInput} Partners` : "Surprise Me (Any Topic) →")}
-                </motion.button>
+                {/* About Us Link */}
+                <div className="text-center mt-8">
+                  <Link
+                    href="/about"
+                    className="text-white/30 hover:text-white/60 text-xs font-medium tracking-wide transition-colors underline underline-offset-4 decoration-white/10 hover:decoration-white/30"
+                  >
+                    About this project ✨
+                  </Link>
+                </div>
+              </motion.div>
+            )}
 
-                {/* Group Chat Button */}
-                <motion.button
-                  onClick={handleGroupMatch}
-                  disabled={isSubmitting}
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  className="w-full py-3 rounded-xl font-semibold text-sm bg-purple-500/10 border border-purple-500/20 text-purple-300 hover:bg-purple-500/20 transition-all cursor-pointer"
-                >
-                  👥 Group Chat
-                </motion.button>
-              </div>
-            </div>
-          </motion.div>
-        )}
+            {phase === "matching" && (
+              <motion.div
+                key="matching"
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }}
+                transition={{ duration: 0.4 }}
+                className="w-full max-w-lg mx-auto z-10"
+              >
+                <div className="flex items-center mb-6">
+                  <button
+                    onClick={() => setPhase("hero")}
+                    className="text-white/40 hover:text-white px-2 py-1 text-sm transition-colors"
+                  >
+                    ← Back
+                  </button>
+                  <div className="flex-1 text-center pr-10">
+                    <h2 className="text-xl font-bold text-white">Match Preferences</h2>
+                  </div>
+                </div>
 
+                <div className="glass glow-purple p-1 bg-gradient-to-b from-white/10 to-white/5 rounded-2xl border border-white/10 shadow-2xl backdrop-blur-xl">
+                  <div className="bg-[#0f0f0f]/90 rounded-xl p-6 sm:p-8 space-y-6">
 
+                    {/* Gender Selection */}
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-white/40 mb-2">I am</label>
+                        <div className="flex bg-black/40 rounded-lg p-1 border border-white/10">
+                          {["Male", "Female", "Other"].map((g) => (
+                            <button
+                              key={g}
+                              onClick={() => setMyGender(g.toLowerCase())}
+                              className={`flex-1 py-2 text-xs font-bold rounded-md transition-all ${myGender === g.toLowerCase()
+                                ? "bg-white/20 text-white shadow-sm"
+                                : "text-white/40 hover:text-white/70"
+                                }`}
+                            >
+                              {g}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-white/40 mb-2">Looking for</label>
+                        <div className="flex bg-black/40 rounded-lg p-1 border border-white/10">
+                          {["Male", "Female", "Any"].map((g) => (
+                            <button
+                              key={g}
+                              onClick={() => setPreference(g.toLowerCase())}
+                              className={`flex-1 py-2 text-xs font-bold rounded-md transition-all ${preference === g.toLowerCase()
+                                ? "bg-white/20 text-white shadow-sm"
+                                : "text-white/40 hover:text-white/70"
+                                }`}
+                            >
+                              {g}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
 
-        {phase === "waiting" && (
-          <WaitingRoom
-            key="waiting"
-            interest={topicInput}
-            queueId={queueId}
-            codename={codename}
-            gender={myGender}
-            preference={preference}
-            onMatched={handleMatched}
-            onCancel={handleReturnHome}
-          />
-        )}
+                    {/* Identity Inputs */}
+                    <div className="grid grid-cols-1 gap-4">
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-white/40 mb-2 ml-1">
+                          Nickname (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          value={nickname}
+                          onChange={(e) => setNickname(e.target.value)}
+                          placeholder="Display Name"
+                          className="w-full px-4 py-3 rounded-xl text-left transition-all duration-300  
+                                  bg-black/40 border border-white/10 hover:border-white/20
+                                  focus:outline-none focus:border-rose-500/50 focus:ring-4 focus:ring-rose-500/10
+                                  text-sm text-white placeholder-white/20 font-medium"
+                        />
+                      </div>
+                    </div>
 
-        {phase === "chat" && (
-          <Chat
-            key="chat"
-            roomId={roomId}
-            userId={userId || queueId}
-            codename={codename}
-            partnerCodename={partnerCodename}
-            roomType={roomType}
-            participants={participants}
-            onDisconnected={handleDisconnected}
-          />
-        )}
+                    {/* Topic Input */}
+                    <div className="relative">
+                      <label className="block text-xs font-bold uppercase tracking-wider text-white/40 mb-2 ml-1">
+                        Topic (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        value={topicInput}
+                        onChange={(e) => {
+                          setTopicInput(e.target.value);
+                          setErrorMsg("");
+                        }}
+                        onKeyDown={handleKeyDown}
+                        placeholder="e.g. Chill, Vent, Movies..."
+                        className="w-full px-5 py-4 rounded-xl text-left transition-all duration-300  
+                                  bg-black/40 border border-white/10 hover:border-white/20
+                                  focus:outline-none focus:border-rose-500/50 focus:ring-4 focus:ring-rose-500/10
+                                  text-base sm:text-lg text-white placeholder-white/20 font-medium"
+                        autoFocus
+                      />
+                    </div>
 
-        {phase === "disconnected" && (
-          <Disconnected
-            key="disconnected"
-            onReturnHome={handleReturnHome}
-            onFindNew={handleFindNew}
-            reason={disconnectReason}
-          />
-        )}
-      </AnimatePresence>
-    </main>
+                    {/* Trending Topics (Dynamic) */}
+                    {stats && stats.top_topics.length > 0 && (
+                      <div className="mb-2">
+                        <div className="flex items-center justify-between mb-2 px-1">
+                          <span className="text-xs font-bold uppercase tracking-wider text-white/30">Trending Now</span>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {stats.top_topics.map((t) => (
+                            <button
+                              key={t.topic}
+                              onClick={() => handleEnter(t.topic)}
+                              className="group relative flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 border border-white/5 hover:bg-white/10 hover:border-white/10 transition-all cursor-pointer"
+                            >
+                              <span className="text-xs text-white/70 font-medium group-hover:text-white">{t.topic}</span>
+                              <span className="text-[10px] font-bold text-rose-300 group-hover:text-rose-200">
+                                {t.count}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Quick Suggestions (Static) */}
+                    <div>
+                      <div className="flex items-center justify-between mb-2 px-1">
+                        <span className="text-xs font-bold uppercase tracking-wider text-white/30">Quick Picks</span>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {SUGGESTIONS.map((s) => (
+                          <button
+                            key={s.label}
+                            onClick={() => handleEnter(s.label)}
+                            className="px-3 py-1.5 rounded-lg bg-white/5 border border-white/5 hover:bg-white/10 hover:border-white/10 transition-all cursor-pointer text-xs text-white/60 hover:text-white"
+                          >
+                            {s.emoji} {s.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Error Message */}
+                    <AnimatePresence>
+                      {errorMsg && (
+                        <motion.div
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: "auto" }}
+                          exit={{ opacity: 0, height: 0 }}
+                          className="text-rose-400 text-xs font-medium pl-1"
+                        >
+                          ⚠️ {errorMsg}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+
+                    {/* CTA Button */}
+                    <motion.button
+                      onClick={() => handleEnter()}
+                      disabled={isSubmitting}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      className={`w-full py-4 rounded-xl font-bold text-base tracking-wide bg-gradient-to-r from-rose-600 to-orange-600 text-white shadow-rose-900/20 hover:shadow-rose-900/40 hover:brightness-110 transition-all duration-300 cursor-pointer shadow-lg ${isSubmitting ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    >
+                      {isSubmitting ? "Searching..." : (topicInput ? `Find ${topicInput} Partners` : "Surprise Me (Any Topic) →")}
+                    </motion.button>
+
+                    {/* Group Chat Button */}
+                    <motion.button
+                      onClick={handleGroupMatch}
+                      disabled={isSubmitting}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      className="w-full py-3 rounded-xl font-semibold text-sm bg-purple-500/10 border border-purple-500/20 text-purple-300 hover:bg-purple-500/20 transition-all cursor-pointer"
+                    >
+                      👥 Group Chat
+                    </motion.button>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {phase === "waiting" && (
+              <WaitingRoom
+                key="waiting"
+                interest={topicInput}
+                queueId={queueId}
+                codename={codename}
+                gender={myGender}
+                preference={preference}
+                onMatched={handleMatched}
+                onCancel={handleReturnHome}
+              />
+            )}
+
+            {phase === "chat" && (
+              <Chat
+                key="chat"
+                roomId={roomId}
+                userId={userId || queueId}
+                codename={codename}
+                partnerCodename={partnerCodename}
+                roomType={roomType}
+                participants={participants}
+                onDisconnected={handleDisconnected}
+              />
+            )}
+
+            {phase === "disconnected" && (
+              <Disconnected
+                key="disconnected"
+                onReturnHome={handleReturnHome}
+                onFindNew={handleFindNew}
+                reason={disconnectReason}
+              />
+            )}
+          </AnimatePresence>
+          <GlobalChat />
+        </main>
+      )}
+    </div>
   );
 }
