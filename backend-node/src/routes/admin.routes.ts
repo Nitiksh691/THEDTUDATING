@@ -4,6 +4,10 @@ import { flushAll } from "../controllers/admin.controller";
 
 const router = Router();
 
-router.post("/admin/flush", adminAuth, flushAll);
+router.get("/verify", adminAuth, (req, res) => {
+    res.json({ status: "ok" });
+});
+
+router.post("/flush", adminAuth, flushAll);
 
 export default router;

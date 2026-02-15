@@ -27,4 +27,18 @@ export const env = {
 
     /** CORS origins (comma-separated or *) */
     CORS_ORIGINS: process.env.CORS_ORIGINS || "*",
+
+    /** MongoDB Connection String */
+    MONGODB_URI: process.env.MONGODB_URI,
 } as const;
+
+// ─── Validation ────────────────────────────────────────────────────────────
+
+if (!env.UPSTASH_REDIS_REST_URL || !env.UPSTASH_REDIS_REST_TOKEN) {
+    console.error("❌ Missing Redis credentials in .env file");
+    process.exit(1);
+}
+
+if (!env.MONGODB_URI) {
+    console.warn("⚠️  Missing MONGODB_URI in .env file — MongoDB features (Admin/Polls) will not work.");
+}

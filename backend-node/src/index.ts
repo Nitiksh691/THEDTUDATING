@@ -3,6 +3,7 @@ import cors from "cors";
 import http from "http";
 import { env } from "./config/env";
 import { initSocket } from "./socket";
+import { connectMongo } from "./config/mongo";
 
 // ─── Route Imports ─────────────────────────────────────────────────────────
 import matchRoutes from "./routes/match.routes";
@@ -11,6 +12,8 @@ import chatRoutes from "./routes/chat.routes";
 import groupRoutes from "./routes/group.routes";
 import globalChatRoutes from "./routes/global-chat.routes";
 import adminRoutes from "./routes/admin.routes";
+import notificationRoutes from "./routes/notification.routes";
+import pollRoutes from "./routes/poll.routes";
 
 // ─── App Setup ─────────────────────────────────────────────────────────────
 
@@ -19,6 +22,9 @@ const server = http.createServer(app);
 
 // Initialize Socket.io
 initSocket(server);
+
+// Connect to MongoDB
+connectMongo();
 
 // Middleware
 app.use(cors({ origin: env.CORS_ORIGINS === "*" ? true : env.CORS_ORIGINS.split(",") }));
@@ -188,17 +194,20 @@ app.use(matchRoutes);
 app.use(queueRoutes);
 app.use(chatRoutes);
 app.use(groupRoutes);
-app.use(globalChatRoutes);
-app.use(adminRoutes);
+app.use("/global-chat", globalChatRoutes);
+app.use("/notifications", notificationRoutes);
+app.use("/polls", pollRoutes);
+
+// Admin routes (e.g. stats, bans)
+app.use("/admin", adminRoutes);
 
 // ─── Start Server ──────────────────────────────────────────────────────────
 
 server.listen(env.PORT, () => {
     console.log(`
-  ╔══════════════════════════════════════════╗
   ║  DD Backend (Node.js) is running! 🚀     ║
   ║  Port: ${env.PORT}                            ║
-  ║  Dashboard: http://localhost:${env.PORT}       ║
+  ║  Ready to accept connections               ║
   ╚══════════════════════════════════════════╝
   `);
 });
