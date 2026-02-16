@@ -9,7 +9,7 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "The Blind Connection",
+  title: "Blind Conversation",
   description:
     "A social experiment. Match by interest. Chat anonymously. No profiles, no photos, zero persistence.",
 };

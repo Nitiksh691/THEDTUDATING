@@ -424,7 +424,7 @@ export default function Home() {
                 {/* ─── Brand Logo/Title ─── */}
                 <div className="mb-8 relative inline-block group">
                   <h1 className="relative text-5xl sm:text-7xl font-bold tracking-tight text-white mb-2">
-                    DD Dating
+                    Blind Conversation
                   </h1>
                   <div className="flex items-center justify-center gap-2 text-white/40 text-sm font-medium tracking-widest uppercase">
                     <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
