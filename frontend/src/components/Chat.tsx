@@ -55,7 +55,9 @@ export default function Chat({
     const [revealState, setRevealState] = useState<
         "idle" | "i_requested" | "partner_requested" | "mutual"
     >("idle");
+    const [revealOpen, setRevealOpen] = useState(false);
     const [partnerRevealData, setPartnerRevealData] = useState<Record<string, string> | null>(null);
+    const [partnerSubmitted, setPartnerSubmitted] = useState(false);
     const [activeReactionMsgId, setActiveReactionMsgId] = useState<string | null>(null);
     const [showEmojiPicker, setShowEmojiPicker] = useState(false);
     const [floatingReactions, setFloatingReactions] = useState<{ id: string; emoji: string; x: number }[]>([]);
@@ -137,8 +139,21 @@ export default function Chat({
                 setRevealState((prev) => prev === "i_requested" ? "mutual" : "partner_requested");
             } else if (msg.type === "reveal_accept") {
                 setRevealState("mutual");
-            } else if (msg.type === "reveal_data") {
+            } else if (msg.type === "reveal_escrowed") {
+                // Server confirmed our data is stored
+            } else if (msg.type === "reveal_submitted") {
+                // Partner has submitted their data
+                setPartnerSubmitted(true);
+            } else if (msg.type === "reveal_ready") {
+                // Both submitted! Server sends partner's data
                 setPartnerRevealData(msg.fields);
+                setRevealOpen(true);
+            } else if (msg.type === "reveal_cancelled") {
+                // Reset everything
+                setRevealState("idle");
+                setRevealOpen(false);
+                setPartnerRevealData(null);
+                setPartnerSubmitted(false);
             } else if (msg.type === "partner_disconnected") {
                 console.log("[Blind Connection] ⚠️ Partner disconnected");
                 onDisconnectedRef.current("partner_left");
@@ -294,16 +309,32 @@ export default function Chat({
         const socket = getSocket();
         if (revealState === "idle") {
             setRevealState("i_requested");
+            setRevealOpen(true);
             socket.emit("signal", { room_id: roomId, user_id: userId, type: "reveal_request" });
         } else if (revealState === "partner_requested") {
             setRevealState("mutual");
+            setRevealOpen(true);
             socket.emit("signal", { room_id: roomId, user_id: userId, type: "reveal_accept" });
         }
     };
 
     const handleSendRevealData = (fields: Record<string, string>) => {
         const socket = getSocket();
+        // Send to server escrow — server will only deliver when both submit
         socket.emit("signal", { room_id: roomId, user_id: userId, type: "reveal_data", payload: fields });
+    };
+
+    const handleCancelReveal = () => {
+        const socket = getSocket();
+        socket.emit("signal", { room_id: roomId, user_id: userId, type: "reveal_cancel" });
+        setRevealState("idle");
+        setRevealOpen(false);
+        setPartnerRevealData(null);
+        setPartnerSubmitted(false);
+    };
+
+    const handleCloseReveal = () => {
+        setRevealOpen(false);
     };
 
     const formatTime = (ts: number) => {
@@ -409,16 +440,7 @@ export default function Chat({
                 )}
             </AnimatePresence>
 
-            {/* Reveal Card */}
-            <AnimatePresence>
-                {revealState === "mutual" && (
-                    <RevealCard
-                        partnerCodename={partnerCodename}
-                        partnerData={partnerRevealData}
-                        onSendData={handleSendRevealData}
-                    />
-                )}
-            </AnimatePresence>
+            {/* Reveal Card — positioned as bottom panel */}
 
             {/* Messages Area */}
             <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 space-y-3">
@@ -557,7 +579,24 @@ export default function Chat({
                 </AnimatePresence>
 
                 <div ref={messagesEndRef} />
+
+                {/* Spacer for reveal card when open */}
+                {revealOpen && <div className="h-48" />}
             </div>
+
+            {/* Reveal Card Bottom Panel */}
+            <AnimatePresence>
+                {revealOpen && (
+                    <RevealCard
+                        partnerCodename={partnerCodename}
+                        partnerData={partnerRevealData}
+                        partnerSubmitted={partnerSubmitted}
+                        onSendData={handleSendRevealData}
+                        onCancel={handleCancelReveal}
+                        onClose={handleCloseReveal}
+                    />
+                )}
+            </AnimatePresence>
 
             {/* Input Bar */}
             <div className="shrink-0 px-3 sm:px-6 py-3 sm:py-4 border-t border-white/[0.06]">

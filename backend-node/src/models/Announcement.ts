@@ -11,7 +11,7 @@ export interface IAnnouncement extends Document {
 const AnnouncementSchema: Schema = new Schema({
     title: { type: String, required: true },
     message: { type: String, required: true },
-    type: { type: String, enum: ["info", "warning", "success", "tech-stack"], default: "info" },
+    type: { type: String, enum: ["info", "warning", "success"], default: "info" },
     active: { type: Boolean, default: true },
     createdAt: { type: Date, default: Date.now },
 });

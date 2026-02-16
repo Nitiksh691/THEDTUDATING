@@ -208,6 +208,88 @@ export async function getSenderCodename(
     return "partner";
 }
 
+// ─── Reveal Escrow System ──────────────────────────────────────────────────
+// Both users must submit their reveal data before either can see the other's.
+// Data is held in Redis until both submit, then delivered simultaneously.
+
+const REVEAL_TTL = 3600; // 1 hour
+
+/**
+ * Submit reveal data for escrow. Returns the result:
+ * - "waiting"      → stored, waiting for partner
+ * - "both_ready"   → both submitted, returns both users' data
+ */
+export async function submitRevealData(
+    roomId: string,
+    userId: string,
+    fields: Record<string, string>,
+): Promise<{
+    status: "waiting" | "both_ready";
+    partnerData?: Record<string, string>;
+    userData?: Record<string, string>;
+    partnerId?: string;
+}> {
+    const revealKey = `reveal:${roomId}:${userId}`;
+    await redis.set(revealKey, JSON.stringify(fields));
+    await redis.expire(revealKey, REVEAL_TTL);
+
+    // Find the partner
+    const participants = await redis.smembers(`room:${roomId}:p`);
+    const partnerId = participants.find((pid) => pid !== userId);
+
+    if (!partnerId) {
+        return { status: "waiting" };
+    }
+
+    // Check if partner also submitted
+    const partnerRevealStr = await redis.get(`reveal:${roomId}:${partnerId}`);
+
+    if (partnerRevealStr) {
+        // Both submitted! Return both data sets
+        const partnerData = (typeof partnerRevealStr === "string"
+            ? JSON.parse(partnerRevealStr)
+            : partnerRevealStr) as Record<string, string>;
+
+        return {
+            status: "both_ready",
+            partnerData,
+            userData: fields,
+            partnerId,
+        };
+    }
+
+    // Only this user submitted — notify partner that we're waiting
+    const submittedMsg = JSON.stringify({ type: "reveal_submitted" });
+    await redis.rpush(`mailbox:${partnerId}`, submittedMsg);
+    await redis.expire(`mailbox:${partnerId}`, MAILBOX_TTL);
+
+    return { status: "waiting" };
+}
+
+/**
+ * Cancel a reveal. Deletes the user's escrowed data and notifies the partner.
+ */
+export async function cancelReveal(
+    roomId: string,
+    userId: string,
+): Promise<void> {
+    // Delete this user's reveal data
+    await redis.del(`reveal:${roomId}:${userId}`);
+
+    // Notify partner
+    const participants = await redis.smembers(`room:${roomId}:p`);
+    const cancelMsg = JSON.stringify({ type: "reveal_cancelled" });
+
+    for (const pid of participants) {
+        if (pid !== userId) {
+            // Also delete partner's reveal data (full reset)
+            await redis.del(`reveal:${roomId}:${pid}`);
+            await redis.rpush(`mailbox:${pid}`, cancelMsg);
+            await redis.expire(`mailbox:${pid}`, MAILBOX_TTL);
+        }
+    }
+}
+
 // ─── Private Helpers ───────────────────────────────────────────────────────
 
 function sleep(ms: number): Promise<void> {

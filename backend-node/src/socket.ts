@@ -8,6 +8,8 @@ import {
     sendTyping,
     sendSignal,
     getSenderCodename,
+    submitRevealData,
+    cancelReveal,
 } from "./services/chat.service";
 import { sanitizeText } from "./middleware/validate";
 
@@ -86,7 +88,49 @@ export function initSocket(httpServer: HTTPServer): Server {
             if (!room_id || !user_id || !type) return;
 
             try {
-                // Persist to Redis mailbox
+                // ── Reveal Escrow: server-side mutual reveal ──
+                if (type === "reveal_data") {
+                    const result = await submitRevealData(room_id, user_id, payload || {});
+
+                    if (result.status === "both_ready") {
+                        // Send each user the OTHER's data
+                        // To the submitter: partner's data
+                        socket.emit("new_message", {
+                            type: "reveal_ready",
+                            fields: result.partnerData,
+                        });
+
+                        // To the partner: this user's data
+                        if (result.partnerId) {
+                            socket.to(room_id).emit("new_message", {
+                                type: "reveal_ready",
+                                fields: result.userData,
+                            });
+                        }
+                    } else {
+                        // Notify submitter that their data is escrowed
+                        socket.emit("new_message", {
+                            type: "reveal_escrowed",
+                        });
+
+                        // Notify partner via socket too
+                        socket.to(room_id).emit("new_message", {
+                            type: "reveal_submitted",
+                        });
+                    }
+                    return;
+                }
+
+                if (type === "reveal_cancel") {
+                    await cancelReveal(room_id, user_id);
+
+                    // Notify both users
+                    socket.emit("new_message", { type: "reveal_cancelled" });
+                    socket.to(room_id).emit("new_message", { type: "reveal_cancelled" });
+                    return;
+                }
+
+                // ── All other signals (reaction, reveal_request, etc.) ──
                 await sendSignal(room_id, user_id, type, payload);
 
                 // Broadcast to room

@@ -378,9 +378,24 @@ export default function Home() {
 
       {/* ─── Background Effects ─── */}
       <div className="fixed inset-0 pointer-events-none">
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-purple-900/10 blur-[120px] rounded-full mix-blend-screen animate-pulse-slow" />
-        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-rose-900/10 blur-[120px] rounded-full mix-blend-screen animate-pulse-slow delay-1000" />
-        <div className="absolute top-[20%] right-[10%] w-[20%] h-[20%] bg-blue-900/10 blur-[100px] rounded-full mix-blend-screen animate-pulse-slow delay-2000" />
+        {/* Large blueish orb - top left */}
+        <div className="absolute top-[-15%] left-[-10%] w-[500px] h-[500px] rounded-full mix-blend-screen animate-pulse-slow"
+          style={{ background: 'radial-gradient(circle, rgba(99,102,241,0.18) 0%, rgba(59,130,246,0.08) 40%, transparent 70%)' }} />
+        {/* Deep red/rose orb - bottom right */}
+        <div className="absolute bottom-[-10%] right-[-10%] w-[550px] h-[550px] rounded-full mix-blend-screen animate-pulse-slow"
+          style={{ background: 'radial-gradient(circle, rgba(244,63,94,0.15) 0%, rgba(225,29,72,0.06) 45%, transparent 70%)', animationDelay: '1.5s' }} />
+        {/* Blue-violet orb - top right */}
+        <div className="absolute top-[15%] right-[5%] w-[350px] h-[350px] rounded-full mix-blend-screen animate-pulse-slow"
+          style={{ background: 'radial-gradient(circle, rgba(139,92,246,0.14) 0%, rgba(99,102,241,0.06) 50%, transparent 70%)', animationDelay: '3s' }} />
+        {/* Rose/coral orb - center left */}
+        <div className="absolute top-[50%] left-[5%] w-[300px] h-[300px] rounded-full mix-blend-screen animate-pulse-slow"
+          style={{ background: 'radial-gradient(circle, rgba(251,113,133,0.12) 0%, rgba(244,63,94,0.05) 50%, transparent 70%)', animationDelay: '2s' }} />
+        {/* Subtle cyan accent - bottom left */}
+        <div className="absolute bottom-[20%] left-[20%] w-[250px] h-[250px] rounded-full mix-blend-screen animate-pulse-slow"
+          style={{ background: 'radial-gradient(circle, rgba(56,189,248,0.1) 0%, transparent 60%)', animationDelay: '4s' }} />
+        {/* Deep indigo orb - center */}
+        <div className="absolute top-[30%] left-[40%] w-[400px] h-[400px] rounded-full mix-blend-screen animate-pulse-slow"
+          style={{ background: 'radial-gradient(circle, rgba(79,70,229,0.08) 0%, transparent 60%)', animationDelay: '2.5s' }} />
       </div>
 
       {/* ─── Spotlight Effect ─── */}
@@ -443,6 +458,13 @@ export default function Home() {
                     Connect with me
                   </span>
                   <div className="flex gap-3">
+                    <a
+                      href="mailto:nitikshpal@gmail.com"
+                      className="p-2.5 rounded-xl bg-white/[0.04] border border-white/10 hover:bg-gradient-to-tr hover:from-blue-500/20 hover:to-cyan-500/20 hover:border-white/20 transition-all group"
+                      title="Email"
+                    >
+                      <span className="text-white/60 group-hover:text-white transition-colors">✉️</span>
+                    </a>
                     <a
                       href="https://www.instagram.com/nitiksh_das?igsh=ZmRhZXcycDJhYXlo&utm_source=qr"
                       target="_blank"
