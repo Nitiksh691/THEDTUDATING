@@ -20,6 +20,7 @@ interface ChatProps {
     userId: string;
     codename: string;
     partnerCodename: string;
+    topic?: string;
     roomType?: "pair" | "group";
     participants?: string[];
     onDisconnected: (reason?: "partner_left" | "error" | null) => void;
@@ -44,6 +45,7 @@ export default function Chat({
     userId,
     codename,
     partnerCodename,
+    topic = "random",
     roomType = "pair",
     participants: initialParticipants,
     onDisconnected,
@@ -92,6 +94,47 @@ export default function Chat({
     useEffect(() => {
         onDisconnectedRef.current = onDisconnected;
     }, [onDisconnected]);
+
+    // ─── Save Revealed Connection to History ─────────────────────────────
+    const saveToHistory = (pCodename: string, chatTopic: string, revealedFields: Record<string, string>) => {
+        try {
+            // 1. Get or create visitorId
+            let visitorId = localStorage.getItem("blind_visitor_id");
+            if (!visitorId) {
+                visitorId = crypto.randomUUID();
+                localStorage.setItem("blind_visitor_id", visitorId);
+            }
+
+            // 2. Build entry
+            const entry = {
+                partnerCodename: pCodename,
+                topic: chatTopic,
+                revealedFields,
+                chatDate: new Date().toISOString(),
+            };
+
+            // 3. Save to localStorage (instant, capped at 3)
+            const raw = localStorage.getItem("blind_history");
+            const history = raw ? JSON.parse(raw) : [];
+            history.push(entry);
+            if (history.length > 3) history.shift(); // keep last 3
+            localStorage.setItem("blind_history", JSON.stringify(history));
+
+            // 4. Persist to MongoDB (fire-and-forget, no await needed)
+            fetch(`${API_URL}/history/save`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    visitorId,
+                    partnerCodename: pCodename,
+                    topic: chatTopic,
+                    revealedFields,
+                }),
+            }).catch((err) => console.error("[History] Save to server failed:", err));
+        } catch (err) {
+            console.error("[History] Failed to save:", err);
+        }
+    };
 
     // ─── Socket.io Real-Time Connection ────────────────────────────────
     useEffect(() => {
@@ -148,6 +191,8 @@ export default function Chat({
                 // Both submitted! Server sends partner's data
                 setPartnerRevealData(msg.fields);
                 setRevealOpen(true);
+                // Save to history (localStorage + MongoDB)
+                saveToHistory(partnerCodename, topic, msg.fields);
             } else if (msg.type === "reveal_cancelled") {
                 // Reset everything
                 setRevealState("idle");

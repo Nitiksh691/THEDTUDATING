@@ -50,6 +50,30 @@ export default function Home() {
   const [votedOption, setVotedOption] = useState<number | null>(null);
   const [isPollMinimized, setIsPollMinimized] = useState(false);
   const failCountRef = useRef(0);
+  const [chatHistory, setChatHistory] = useState<any[]>([]);
+
+  // Load chat history from localStorage (instant) + sync from MongoDB
+  useEffect(() => {
+    // 1. Instant load from localStorage
+    const raw = localStorage.getItem("blind_history");
+    if (raw) {
+      try { setChatHistory(JSON.parse(raw)); } catch { /* ignore */ }
+    }
+
+    // 2. Sync from MongoDB (for cross-browser persistence)
+    const visitorId = localStorage.getItem("blind_visitor_id");
+    if (visitorId) {
+      fetch(`${API_URL}/history/${visitorId}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.history && data.history.length > 0) {
+            setChatHistory(data.history);
+            localStorage.setItem("blind_history", JSON.stringify(data.history));
+          }
+        })
+        .catch(err => console.error("[History] Sync failed:", err));
+    }
+  }, []);
 
   // Load dismissed notifications from LocalStorage
   useEffect(() => {
@@ -495,6 +519,57 @@ export default function Home() {
                     About this project ✨
                   </Link>
                 </div>
+
+                {/* ─── Recent Connections ─── */}
+                {chatHistory.length > 0 && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.3 }}
+                    className="mt-8 w-full max-w-lg"
+                  >
+                    <h3 className="text-xs font-bold uppercase tracking-widest text-white/30 mb-3 text-center">
+                      🕊️ Recent Connections
+                    </h3>
+                    <div className="space-y-2">
+                      {chatHistory.slice().reverse().map((entry: any, idx: number) => (
+                        <div
+                          key={idx}
+                          className="glass p-3 rounded-xl border border-white/5 hover:border-white/10 transition-all group"
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500/30 to-rose-500/30 flex items-center justify-center text-xs font-bold text-white/70">
+                                {entry.partnerCodename?.charAt(0) || "?"}
+                              </div>
+                              <div>
+                                <p className="text-sm font-medium text-white/80 group-hover:text-white transition-colors">
+                                  {entry.partnerCodename}
+                                </p>
+                                <p className="text-[10px] text-white/30">
+                                  {entry.topic || "random"} · {entry.chatDate ? new Date(entry.chatDate).toLocaleDateString() : ""}
+                                </p>
+                              </div>
+                            </div>
+                            {entry.revealedFields && Object.keys(entry.revealedFields).length > 0 && (
+                              <div className="flex flex-wrap gap-1">
+                                {Object.entries(entry.revealedFields).map(([key, val]) => (
+                                  <span
+                                    key={key}
+                                    className="px-2 py-0.5 rounded-full bg-white/5 text-[10px] text-white/50 font-medium"
+                                    title={`${key}: ${val}`}
+                                  >
+                                    {key}: {String(val)}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
               </motion.div>
             )}
 
@@ -702,6 +777,7 @@ export default function Home() {
                 userId={userId || queueId}
                 codename={codename}
                 partnerCodename={partnerCodename}
+                topic={topicInput || "random"}
                 roomType={roomType}
                 participants={participants}
                 onDisconnected={handleDisconnected}

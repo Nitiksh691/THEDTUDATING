@@ -14,6 +14,7 @@ import globalChatRoutes from "./routes/global-chat.routes";
 import adminRoutes from "./routes/admin.routes";
 import notificationRoutes from "./routes/notification.routes";
 import pollRoutes from "./routes/poll.routes";
+import historyRoutes from "./routes/history.routes";
 
 // ─── App Setup ─────────────────────────────────────────────────────────────
 
@@ -197,6 +198,7 @@ app.use(groupRoutes);
 app.use(globalChatRoutes);
 app.use("/notifications", notificationRoutes);
 app.use("/polls", pollRoutes);
+app.use("/history", historyRoutes);
 
 // Admin routes (e.g. stats, bans)
 app.use("/admin", adminRoutes);
